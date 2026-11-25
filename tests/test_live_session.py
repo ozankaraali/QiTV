@@ -9736,11 +9736,10 @@ class BroadcasterTests(LiveSessionCase):
     DAY = 1_795_000_000.0  # the date of the media at timeline second 0
 
     def test_a_dated_source_reports_how_far_its_picture_is_behind_the_broadcaster(self):
-        # Pieces dated from DAY; at timeline second 2 a 30 s ad break skipped (its pieces
-        # never fetched): the dates jump on, the timeline does not.
+        # Pieces dated from DAY; then at timeline second 2 a 30 s ad break skipped (its
+        # pieces never fetched): the dates jump on, the timeline does not.
         sid = self.ready(segments(0, 2), live_edge=4.0)
-        dates = [[0.0, self.DAY], [2.0, self.DAY + 30.0]]
-        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=dates)
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=[[0.0, self.DAY]])
         wall = [self.DAY + 3.25]
         self.live._wall = lambda: wall[0]
         self.playback.set_state(PlaybackState.PLAYING)
@@ -9753,11 +9752,43 @@ class BroadcasterTests(LiveSessionCase):
         wall[0] += 1.0
         self.step(0.0)  # the picture stood while the broadcaster went on
         self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 4.0)
+        dates = [[0.0, self.DAY], [2.0, self.DAY + 30.0]]
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=dates)
         wall[0] = self.DAY + 36.0
         self.step(1.5)  # position 2.75, after the break: dated DAY + 32.75
         self.assertAlmostEqual(self.timelines[-1]["position"], 2.75)
         self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.25)
         self.assertLess(self.timelines[-1]["lag"], 2.0)  # "Behind live", its own yardstick
+
+    def test_dates_far_off_this_computers_clock_give_no_figure(self):
+        # Ruling R30: the newest piece's date more than 30 s off the clock (an encoder's start
+        # time, a clock set wrong) gives no figure, an hour behind it or 40 s ahead alike. It
+        # is the source that is judged, not the picture: one paused while fresh pieces come
+        # says how far behind it is, past a minute.
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        wall = [self.DAY + 3.0]
+        self.live._wall = lambda: wall[0]
+        self.playback.set_state(PlaybackState.PLAYING)
+        for day in (self.DAY - 3600.0, self.DAY + 40.0):
+            with self.subTest(newest=day + 4.0 - wall[0]):
+                self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=[[0.0, day]])
+                self.step(0.25)
+                self.assertIsNone(self.timelines[-1]["behind_broadcaster"])
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=[[0.0, self.DAY]])
+        self.step(0.25)  # position 0.75, the newest piece 1 s ahead of the clock
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 2.25)
+        self.live.toggle_pause()
+        for k in range(1, 61):  # a minute paused while the channel's pieces come on
+            wall[0] += 1.0
+            self.engine.buffer(
+                sid, segments(0, 2), open_seq=2, live_edge=4.0 + k, dates=[[0.0, self.DAY]]
+            )
+            self.step(1.0, media=0.0)
+        state = self.timelines[-1]
+        self.assertAlmostEqual(state["position"], 0.75)
+        self.assertAlmostEqual(state["behind_broadcaster"], 62.25)
+        shown = dict(stats_rows({"lag": state["lag"], "behind_broadcaster": 62.25}))
+        self.assertEqual(shown["Behind the broadcaster"], "62.2 s")
 
     def test_an_undated_source_reports_no_broadcaster_figure(self):
         sid = self.ready(segments(0, 2), live_edge=4.0)

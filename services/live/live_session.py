@@ -536,6 +536,10 @@ _JUNCTION_CHANGE_S = 1.0  # an ask moves by this much at least (or to 0): no cha
 # 2026-11-25 (ruling R21): a source that reads its prefetch pieces as they are made is held close
 # to live (`StayLive.close`, `LearnedTarget.close`) at a target in force up to this, no more.
 _CLOSE_MAX_S = 1.5
+# 2026-11-25 (ruling R30): the statistics' "Behind the broadcaster" says nothing while the newest
+# piece's date is further than this off this computer's clock (an encoder's start time, a clock
+# set wrong: a figure of hours would be no latency).
+_BROADCASTER_CLOCK_S = 30.0
 
 
 def segment_floor_from(value: str) -> bool:
@@ -4480,21 +4484,35 @@ class LiveSession(QObject):
         reckoned for it), plus how far into the piece the position is. The helper places the
         dates on the timeline (`dates`: [timeline second, a piece's date less it] from there
         on). None: an undated source, or a position it placed no date at (a run's first
-        piece, an undated one, before the buffer: a server part or an archive)."""
+        piece, an undated one, before the buffer: a server part or an archive). None too while
+        the newest piece's date (the last run's, at the helper's live edge) is more than
+        `_BROADCASTER_CLOCK_S` off the clock (ruling R30): judged by the source, not the
+        position, so a picture paused or rewound keeps its figure however far back it is; a
+        source stalled longer than that loses it until its pieces come again."""
         dates = snapshot.get("dates")
-        if not isinstance(dates, list) or position < _number(snapshot.get("start")):
+        if not isinstance(dates, list) or not dates:
             return None
-        offset = None
+        if position < _number(snapshot.get("start")):
+            return None
         for entry in dates:
             if not isinstance(entry, (list, tuple)) or len(entry) != 2:
                 return None
-            at, value = entry
-            if not isinstance(at, (int, float)) or at > position:
+            if not isinstance(entry[0], (int, float)):
+                return None
+        now = self._wall()
+        newest = dates[-1][1]
+        if not isinstance(newest, (int, float)):
+            return None  # the newest piece is undated: nothing tells the clock is right
+        if not abs(now - (newest + _number(snapshot.get("live_edge")))) <= _BROADCASTER_CLOCK_S:
+            return None
+        offset = None
+        for at, value in dates:
+            if at > position:
                 break
             offset = value
         if not isinstance(offset, (int, float)):
             return None
-        behind = self._wall() - (offset + position)
+        behind = now - (offset + position)
         return behind if math.isfinite(behind) else None
 
     # ---- helpers -----------------------------------------------------------------------

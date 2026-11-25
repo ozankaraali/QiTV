@@ -341,9 +341,8 @@ def stats_rows(stats: Mapping[str, Any]) -> list[tuple[str, str]]:
         rows.append((tr("Behind live"), tr("{seconds} s", seconds=seconds)))  # i18n: seconds
     behind = stats.get("behind_broadcaster")
     if isinstance(behind, (int, float)) and math.isfinite(behind) and behind >= 0:
-        name = tr(
-            # i18n: the statistics' row: how far the picture plays behind the broadcaster
-            "Behind the broadcaster",  # i18n: counted from the time the site stamped on the piece
-        )  # i18n: as the site's own player's latency figure counts
-        rows.append((name, tr("{seconds} s", seconds=i18n.decimal(f"{behind:.1f}"))))
+        seconds = i18n.decimal(f"{behind:.1f}")
+        # i18n: the statistics: from the time the site stamped on the piece, as its player's latency
+        name = tr("Behind the broadcaster")
+        rows.append((name, tr("{seconds} s", seconds=seconds)))
     return rows

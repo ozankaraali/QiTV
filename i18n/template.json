@@ -93,7 +93,7 @@
     "Back to the full window (Alt+P)": "tooltip in the mini player",
     "Back to the player": "tooltip: the corner player takes the window again",
     "Behind live": "the statistics' row: how far the picture plays behind the channel's live edge; seconds",
-    "Behind the broadcaster": "the statistics' row: how far the picture plays behind the broadcaster; counted from the time the site stamped on the piece; as the site's own player's latency figure counts",
+    "Behind the broadcaster": "the statistics: from the time the site stamped on the piece, as its player's latency",
     "Big picture (double-click)": "tooltip on a multiview tile's controls: leave the grid with this tile big",
     "Bitrate": "the statistics' row",
     "Buffer from {time}": "under the time-shift bar, left: the oldest buffered time (\"18:44\")",
