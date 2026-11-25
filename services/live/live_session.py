@@ -291,7 +291,7 @@ import math
 import os
 from statistics import median
 import time
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -4844,7 +4844,10 @@ class LiveSession(QObject):
 
     def _place_recording(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
         """2.15: a recording part goes where its first piece's date lies on the buffer's
-        timeline: its PROGRAM-DATE-TIME, else the recording's start and the lengths before it."""
+        timeline: its PROGRAM-DATE-TIME, else the recording's start and the lengths before it.
+        Where its timestamps and the buffer's run on one line (within `_JOIN_PTS_S` of that,
+        live: Twitch fMP4's lay 3-5 s off by its date), by them: its join then lands where
+        its position says, with no step (placed once its first segment closed)."""
         route = self._site_rec
         if part.offset is not None or route is None or self._sid is None:
             return
@@ -4854,7 +4857,32 @@ class LiveSession(QObject):
             first = route.start + float(at) if isinstance(at, (int, float)) else None
         if first is None:
             return
-        part.offset = self._t_of_date(self._snapshot(), float(first))
+        by_date = self._t_of_date(self._snapshot(), float(first))
+        own = self._engine.spans(part.sid)
+        if by_date is None or not own:
+            return  # (its first segment's timestamps tell where it lies more exactly)
+        by_pts = self._t_by_timestamps(own[0])
+        if by_pts is not None and abs(by_pts - by_date) <= _JOIN_PTS_S:
+            if abs(by_pts - by_date) > 0.5:
+                _LOG.info(
+                    "The site's recording lies %+.2f s off its date, by its timestamps.",
+                    by_pts - by_date,
+                )
+            part.offset = by_pts
+            return
+        part.offset = by_date
+
+    def _t_by_timestamps(self, first: Span) -> Optional[float]:
+        """2.15: where a part's own second 0 lies on the buffer's timeline by its first
+        segment's PTS against the buffer's (its newest segment's: one encoder's line runs at
+        90 kHz); None when either is not known."""
+        if first.first_pts is None or self._sid is None:
+            return None
+        live = [span for span in self._engine.spans(self._sid) if span.first_pts is not None]
+        if not live:
+            return None
+        ref, ref_pts = live[-1], cast(int, live[-1].first_pts)
+        return ref.start + _pts_step(ref_pts, first.first_pts) / 90_000 - first.start
 
     # ---- 2.15: the backfill (Kick) ------------------------------------------------------
     def _open_backfill(self, route: RecordingRoute) -> None:

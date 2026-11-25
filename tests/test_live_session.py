@@ -8937,6 +8937,8 @@ class SiteRecordingTests(LiveSessionCase):
         part = self.in_recording(-15.0, own, part_date=9_980.0)
         self.engine.sessionEnded.emit(part)
         self.assertEqual(self.engine.joins, [(part, sid, 4)])
+        # Placed by its timestamps, not its date: its position steps nowhere at the join.
+        self.assertAlmostEqual(self.live._join_shift, 0.0, places=6)
 
     def short_buffer_with_backfill(self):
         """8 s buffered (from media sequence 500), the live playlist listing 28 s: the site's
