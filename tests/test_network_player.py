@@ -1563,7 +1563,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.live.play_pipeline()
         self.plays_now()
         self.assertTrue(wait_until(lambda: len(asked) == 2))
-        self.assertEqual(len(self.live.named("set_site_recording")), 2)
+        self.assertTrue(wait_until(lambda: len(self.live.named("set_site_recording")) == 2))
 
     def test_history_keeps_the_page_not_the_token(self):
         self.answers = [MASTER]
