@@ -800,6 +800,11 @@ class Fmp4Remuxer:
         each part as it comes, then `end` it. One begun before and not ended is dropped."""
         self._piece = _Piece()
 
+    def abandon(self) -> None:
+        """The segment begun is given up (cut off, or its source closed): nothing of it stays
+        (one that ended is gone already)."""
+        self._piece = None
+
     def feed(self, data: bytes | memoryview) -> bytes:
         """TS of what `data` completes of the segment begun: each moof, in order, once a box
         after it (its mdat) has come whole with its samples' data; PAT and PMT before the

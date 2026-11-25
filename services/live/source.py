@@ -1464,13 +1464,14 @@ def _codec_rank(variant: Any) -> int:
     return best
 
 
-def _variant_rank(variant: Any) -> tuple[int, float, int, int]:
+def _variant_rank(variant: Any) -> tuple[int, int, int, int]:
     """What orders a master's variants that all name their height, best last: picture height,
-    frame rate, codec, then bandwidth (what a master does not name counts as 0)."""
+    frame rate (to the whole frame: 29.97 is 30's, never above another codec of it), codec,
+    then bandwidth (what a master does not name counts as 0)."""
     info = variant.stream_info
     return (
         _height(variant),
-        float(info.frame_rate or 0),
+        round(float(info.frame_rate or 0)),
         _codec_rank(variant),
         info.bandwidth or 0,
     )
@@ -2667,6 +2668,8 @@ class HlsSource:
                     yield ts
         except Fmp4Error as error:
             raise _BadSegment(str(error)) from None
+        finally:
+            remuxer.abandon()  # (a piece cut off keeps nothing of it: Task 10 M4)
 
     def _load_init(self, remuxer: Fmp4Remuxer, init: Any, base: str, loaded: str | None) -> str:
         """Read an fMP4 init section into `remuxer` unless its URI is `loaded` (the one read

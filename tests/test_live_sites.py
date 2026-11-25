@@ -62,6 +62,9 @@ class SitePageTests(unittest.TestCase):
             "example.com/x",
             "ftp://kick.com/examplechannel",
             "notkick.com/examplechannel",
+            "https://user@kick.com/examplechannel",  # (Task 5: no user, no port of its own)
+            "https://kick.com:8443/examplechannel",
+            "twitch.tv:80/examplechannel",
             "",
         ):
             self.assertIsNone(site_page(url), url)
@@ -91,6 +94,12 @@ class KickTests(unittest.TestCase):
         self.assertEqual(self.reason(self.serve((200, JSON, kick_body(live=False)))), "offline")
         body = json.dumps({"playback_url": "x", "livestream": {"is_live": False}}).encode()
         self.assertEqual(self.reason(self.serve((200, JSON, body))), "offline")
+
+    def test_kick_live_without_its_stream_is_refused(self):
+        # A live answer that names no stream (a changed answer): refused, never offline.
+        for playback in (None, "", 7):
+            body = json.dumps({"playback_url": playback, "livestream": {"is_live": True}})
+            self.assertEqual(self.reason(self.serve((200, JSON, body.encode()))), "refused")
 
     def test_kick_unknown(self):
         body = b'{"message":"Channel not found."}'
@@ -303,7 +312,7 @@ class PrivacyTests(unittest.TestCase):
         masked = _Masked(logging.BASIC_FORMAT.replace("%(levelname)s:%(name)s:", ""))
         text = "\n".join(masked.format(record) for record in logs.records)
         self.assertIn("examplechannel is live", text)
-        for secret in (SIGNATURE, "examplechannel\\\"", "token=", "SECRETJWT", "expires", "m3u8"):
+        for secret in (SIGNATURE, TOKEN, '"channel"', "token=", "SECRETJWT", "expires", "m3u8"):
             self.assertNotIn(secret, text)
 
     def test_requests_carry_only_the_browser_user_agent(self):

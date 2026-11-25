@@ -11,7 +11,7 @@ import logging
 import random
 import re
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode, urlsplit
 
 from services.lazy_import import lazy_module
@@ -89,8 +89,11 @@ def site_page(url: str) -> SitePage | None:
     try:
         parts = urlsplit(text)
         host = (parts.hostname or "").lower()
+        port = parts.port
     except ValueError:
         return None
+    if parts.username is not None or parts.password is not None or port is not None:
+        return None  # (a site's page names no user and no port: another address)
     for prefix in ("www.", "m."):
         if host.startswith(prefix):
             host = host[len(prefix) :]
@@ -144,7 +147,13 @@ def resolve(
     return Resolved(url, page_name(page))
 
 
-def _request(http, method, url, stop, **kwargs):
+def _request(
+    http: requests_types.Session,
+    method: str,
+    url: str,
+    stop: threading.Event | None,
+    **kwargs: Any,
+) -> requests_types.Response:
     """One request with the browser User-Agent and no cookies. Every failure of the
     transport is "network"; the exception text is dropped (it can carry the address)."""
     if stop is not None and stop.is_set():
@@ -158,14 +167,16 @@ def _request(http, method, url, stop, **kwargs):
         raise SiteError("network", isinstance(error, requests.Timeout)) from None
 
 
-def _json(response):
+def _json(response: requests_types.Response) -> Any:
     try:
         return response.json()
     except ValueError:
         return None
 
 
-def _kick(channel, http, stop, api):
+def _kick(
+    channel: str, http: requests_types.Session, stop: threading.Event | None, api: str
+) -> str:
     response = _request(http, "GET", f"{api}/{quote(channel, safe='')}", stop)
     status = response.status_code
     if status == 404:
@@ -186,7 +197,13 @@ def _kick(channel, http, stop, api):
     return playback
 
 
-def _twitch(channel, http, stop, gql, usher):
+def _twitch(
+    channel: str,
+    http: requests_types.Session,
+    stop: threading.Event | None,
+    gql: str,
+    usher: str,
+) -> str:
     body = {
         "operationName": "PlaybackAccessToken",
         "extensions": {"persistedQuery": {"version": 1, "sha256Hash": TWITCH_QUERY_HASH}},

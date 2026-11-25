@@ -708,6 +708,16 @@ unsupported.m3u8
         )
         self.assertEqual(self._picked(master), "hevc.m3u8")
 
+    def test_a_rate_a_hair_lower_is_the_same_rate(self):
+        # Task 3: 59.94 is 60's (to the whole frame), so the codec decides between them.
+        master = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,FRAME-RATE=60.000,CODECS="avc1.640028"\nh264.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,FRAME-RATE=59.940,CODECS="hvc1.1.6.L120"\nhevc.m3u8\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1920x1080,FRAME-RATE=30.000,CODECS="hvc1.1.6.L120"\nslow.m3u8\n'
+        )  # fmt: skip
+        self.assertEqual(self._picked(master), "hevc.m3u8")
+
     def test_av1_only_when_carried(self):
         # The spike (.superpowers/docs/sites/av1-spike.md): VLC 3's TS demuxer cannot read AV1,
         # so an AV1 variant is passed over and the best H.264 one plays.
