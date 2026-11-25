@@ -8964,6 +8964,20 @@ class SiteRecordingTests(LiveSessionCase):
         self.live.seek_to(-10.0)  # back into the backfill: from it
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(backfill, 5))
 
+    def test_the_backfill_opens_once_the_buffers_first_piece_is_known(self):
+        # Live 2026-11-25: the site's recording came before the buffer's first piece closed,
+        # and no backfill was fetched.
+        self.live._wall = lambda: 10_200.0
+        sid = self.start()
+        self.engine.buffer(sid, [], hls=True, window=28.0, end=0.0, open_seq=0)
+        self.engine.sessionReady.emit(sid)
+        self.live._phase = live_session._Phase.PIPELINE  # (it plays: its first piece opens)
+        opened = len(self.engine.opened)
+        self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=True, steps=True))
+        self.assertEqual(len(self.engine.opened), opened)  # nothing to fetch back from yet
+        self.engine.buffer(sid, self.SPANS[:2], hls=True, window=28.0, dates=[[0.0, 10_000.0]])
+        self.assertEqual(self.engine.opened[-1][2]["window"]["until_seq"], 500)
+
     def test_at_where_the_recording_does_not_reach_yet_play_waits_and_goes_on(self):
         # Brief 2, 8: at 1x and at 2x, play into the stretch the recording does not list yet
         # waits there (buffering), never jumps and never reopens; it goes on as it grows.

@@ -474,6 +474,7 @@ _HOLE_BACK_S = 2.0  # a seek into where it does not reach yet goes back this far
 # and its stop follows the buffer's start once that moved this much
 _JOIN_INSIDE_S = 70.0
 _BACKFILL_MIN_S = 4.0  # a live playlist listing this much more than the buffer is fetched
+_BACKFILL_TRIES = 40  # ... asked again on the buffer's states until it is known (a few seconds)
 _BACKFILL_AHEAD_S = 600.0  # (all of it at once: it is never played on its own)
 # ... joined at the buffer's segment whose first picture follows the recording's last by its
 # timestamps when they run on one line (within this of a frame), and that segment lies within
@@ -1030,6 +1031,7 @@ class LiveSession(QObject):
         self._bf_join: Optional[tuple[int, float, float]] = None  # (seq, shift, its end)
         self._join_backfill = False  # the recording part joins the backfill, not the buffer
         self._backfill_playing = False
+        self._bf_tries = 0  # states left in which the backfill may still open (`_open_backfill`)
         self._said_scheme: Optional[str] = None  # 2.7.1: the session whose scheme the log said
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
@@ -1692,6 +1694,7 @@ class LiveSession(QObject):
         self._reach_at = self._wall()
         if route is not None:
             _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
+            self._bf_tries = _BACKFILL_TRIES
             self._open_backfill(route)
         if self._phase is _Phase.PIPELINE:
             self._emit_timeline()
@@ -2601,6 +2604,8 @@ class LiveSession(QObject):
             return
         self._say_scheme(snapshot)
         self._say_not_live(snapshot)
+        if self._site_rec is not None and self._backfill is None and self._bf_tries:
+            self._open_backfill(self._site_rec)  # 2.15: once the buffer's first piece is known
         self._follow_ad_break(snapshot)
         self._keep_heights(snapshot)
         self._follow_prefetch(snapshot)
@@ -4862,6 +4867,7 @@ class LiveSession(QObject):
             or self._borrowed is not None
         ):
             return
+        self._bf_tries -= 1  # (live 2026-11-25: asked before the buffer's first piece closed)
         snapshot = self._snapshot()
         live = self._engine.spans(self._sid)
         until = buffer_first_media(live)
@@ -4869,6 +4875,7 @@ class LiveSession(QObject):
         held = self._live_edge(snapshot) - self._buffer_start(snapshot)
         if until is None or listed <= held + _BACKFILL_MIN_S:
             return
+        self._bf_tries = 0
         stop = next((span.start for span in live if span.media_seq == until), None)
         window = {"back_s": listed, "until_seq": until, "ahead_s": _BACKFILL_AHEAD_S, "joins": True}
         sid = self._engine.open_session(self._url, **self._open_args, window=window)
@@ -4914,6 +4921,7 @@ class LiveSession(QObject):
 
     def _close_backfill(self) -> None:
         part, self._backfill, self._bf_join = self._backfill, None, None
+        self._bf_tries = 0
         self._backfill_playing = False
         if part is not None:
             if self._part is part:
