@@ -1025,6 +1025,8 @@ class LiveSession(QObject):
         self._join_shift = 0.0
         self._reach_at = 0.0  # when `_site_reach` was learned (Unix s: it grows from there)
         self._stop_sent = 0.0  # the stop a recording part was given last (the buffer's start)
+        # where the recording's timestamps put it against its dates (`_place_recording`)
+        self._rec_shift = 0.0
         # 2.15 (Kick): what the live playlist still listed from before the buffer's start at
         # the tune, fetched in the background (a server part never played on its own): the
         # recording joins it where it ends, and it joins the buffer; its own join, as asked.
@@ -1693,6 +1695,7 @@ class LiveSession(QObject):
         self._site_rec = route
         self._site_reach = route.until if route is not None else None
         self._reach_at = self._wall()
+        self._rec_shift = 0.0
         if route is not None:
             _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
             self._bf_tries = _BACKFILL_TRIES
@@ -4825,6 +4828,8 @@ class LiveSession(QObject):
         if begin is None or stop is None:
             self._part_failed()
             return
+        # (its dates, as its timestamps put them against the buffer's: `_place_recording`)
+        begin, stop = begin - self._rec_shift, stop - self._rec_shift
         window: dict[str, Any] = {
             "from_s": max(0.0, begin - route.start),
             "stop_s": max(0.0, stop - route.start),
@@ -4863,12 +4868,18 @@ class LiveSession(QObject):
             return  # (its first segment's timestamps tell where it lies more exactly)
         by_pts = self._t_by_timestamps(own[0])
         if by_pts is not None and abs(by_pts - by_date) <= _JOIN_PTS_S:
-            if abs(by_pts - by_date) > 0.5:
+            shift = by_pts - by_date
+            if abs(shift) > 0.5:
                 _LOG.info(
-                    "The site's recording lies %+.2f s off its date, by its timestamps.",
-                    by_pts - by_date,
+                    "The site's recording lies %+.2f s off its date, by its timestamps.", shift
                 )
             part.offset = by_pts
+            if abs(shift - self._rec_shift) > 0.5:
+                # Live, Twitch fMP4: its stop, set by its dates, lay 3 s before the buffer's
+                # start by its timestamps, and it ended short of the buffer: set it again.
+                self._rec_shift, self._stop_sent = shift, -math.inf
+                if not part.ended:
+                    self._follow_stop(part)
             return
         part.offset = by_date
 
@@ -5069,7 +5080,10 @@ class LiveSession(QObject):
         if route is None or self._sid is None:
             return
         stop = self._date_at(self._snapshot(), self._join_target())
-        if stop is None or abs(stop - self._stop_sent) < _STOP_STEP_S:
+        if stop is None:
+            return
+        stop -= self._rec_shift  # (its own dates: `_place_recording`)
+        if abs(stop - self._stop_sent) < _STOP_STEP_S:
             return
         self._stop_sent = stop
         self._engine.set_stop(part.sid, stop, max(0.0, stop - route.start))

@@ -8940,6 +8940,30 @@ class SiteRecordingTests(LiveSessionCase):
         # Placed by its timestamps, not its date: its position steps nowhere at the join.
         self.assertAlmostEqual(self.live._join_shift, 0.0, places=6)
 
+    def test_a_part_placed_by_its_timestamps_stops_where_they_put_the_buffers_start(self):
+        # Live, Twitch fMP4 (2026-11-25): its stop, set by its dates, lay 3 s before the buffer
+        # by its timestamps; it ended short of the buffer, joined nothing, and reopened.
+        spans = [
+            Span(
+                n,
+                2.0 * n,
+                2.0 * n + 2.0,
+                False,
+                media_seq=500 + n,
+                first_pts=9_000_000 + n * 180_000,
+            )
+            for n in range(100)
+        ]
+        self.playing(spans=spans, dated=False)
+        self.live.seek_to(-30.0)
+        part = self.engine.opened[-1][0]
+        self.assertEqual(self.engine.opened[-1][2]["window"]["stop_s"], 3_600.0)
+        own = [Span(0, 0.0, 10.0, False, media_seq=357, first_pts=9_000_000 - 33 * 90_000)]
+        self.engine.buffer(part, own, hls=True, part_start=3_570.0)  # by its date: at -30
+        self.engine.sessionReady.emit(part)
+        self.assertAlmostEqual(self.live._part.offset, -33.0)  # by its timestamps: 3 s before
+        self.assertEqual(self.engine.stops[-1], (part, 10_003.0, 3_603.0))
+
     def short_buffer_with_backfill(self):
         """8 s buffered (from media sequence 500), the live playlist listing 28 s: the site's
         recording known, its backfill (20 s, 490-499) fetched whole and joined to the buffer."""
