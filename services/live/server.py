@@ -33,6 +33,7 @@ import socket
 from socketserver import TCPServer, ThreadingMixIn
 import sys
 import threading
+import time
 from typing import Any
 
 from services.live.ring import Ring, RingError
@@ -42,6 +43,9 @@ _LOG = logging.getLogger(__name__)
 _CHUNK = 64 * 1024
 _HEADER_TIMEOUT = 2.0
 _WAIT = 0.5
+# 2.15: a joining session's ring that ended waits this long for its join (the session asks it
+# once it heard of the end: a moment later) before its response ends
+_JOIN_WAIT_S = 3.0
 _SESSION_ID = r"[A-Za-z0-9_-]{1,64}"
 # `side`: the same stream for a reader that is not the viewer (2.9: AI captions read ahead of
 # the picture); it never moves `reading()`, which follows the viewer's VLC.
@@ -392,6 +396,8 @@ class _Handler(BaseHTTPRequestHandler):
                 continue
             if not complete:
                 if ended:
+                    if joiner is not None:
+                        self._await_join(session)
                     if joiner is not None and session.join is not None:
                         went = self._go_on(session, joiner, side)
                         if went is not None:
@@ -412,6 +418,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if not side and session.reader == turn:
                     session.reading = number
             elif status != "timeout" or ended:
+                if ended and status == "timeout" and joiner is not None:
+                    self._await_join(session)
                 if ended and status == "timeout" and joiner is not None and session.join:
                     went = self._go_on(session, joiner, side)
                     if went is not None:
@@ -422,6 +430,16 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 _wait(session, before)
         return 0 if started else 404
+
+    @staticmethod
+    def _await_join(session: _Session) -> None:
+        """2.15: a joining session's ring ended: its join, asked once the session heard of the
+        end, is waited for up to `_JOIN_WAIT_S` (the player plays what it holds meanwhile)."""
+        deadline = time.monotonic() + _JOIN_WAIT_S
+        ring = session.ring
+        while session.join is None and not session.removed and time.monotonic() < deadline:
+            with ring.changed:
+                ring.changed.wait(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def _go_on(
         self, session: _Session, joiner: ClockJoiner, side: bool

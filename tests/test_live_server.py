@@ -385,6 +385,25 @@ class StreamServerTests(unittest.TestCase):
         more = client.read(188, timeout=3.0)
         self.assertEqual(len(more), 188)
 
+    def test_a_join_asked_a_moment_after_the_recording_ended_still_goes_on(self):
+        # Live 2026-11-25: the session asks the join once it hears of the end, a moment later.
+        from test_repeat_trimmer import video_pts
+        from ts_fixtures import VIDEO_PID
+
+        server = self.start_server()
+        part, part_data = self.ts_ring(900_000)
+        live, live_data = self.ts_ring(70_000_000, segments=2)
+        program = lambda: (VIDEO_PID, 0x1B)  # noqa: E731
+        server.add_session("part", part, lambda: True, program=program, joins=True)
+        server.add_session("live", live, lambda: False, program=program)
+        threading.Timer(0.4, lambda: server.join("part", "live", 1)).start()
+        client = self.client(server.stream_url("part", 0))
+        wanted = len(part_data) + len(live_data) // 2 - 188 * 4
+        received = client.read(wanted, timeout=5.0)
+        self.assertEqual(len(received), wanted)  # it went on into the buffer
+        pts = [p for p in video_pts(received) if p is not None]
+        self.assertEqual({b - a for a, b in zip(pts, pts[1:])}, {3600})
+
     def test_a_join_whose_video_differs_ends_the_stream_there(self):
         from ts_fixtures import VIDEO_PID
 

@@ -3086,6 +3086,32 @@ video.m3u8
         media(server.url + "/rec.m3u8", live_delay=1.0, window=window)
         self.assertEqual(requested_segments(server), ["r0.ts", "r1.ts", "r2.ts"])
 
+    def test_a_recording_part_ends_with_the_piece_reaching_its_stop_unlisted_next(self):
+        # Live 2026-11-25: the piece after it was not listed yet (Kick lists in 30-60 s
+        # steps): waiting for it held the join 4.5 s. The piece reaching the stop is its last.
+        names = [f"r{n}.ts" for n in range(4)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/rec.m3u8"] = (200, {}, self.recording(names))
+        server = self.server(routes)
+        window = {
+            "from_s": 10.0,
+            "stop_s": 999.0,
+            "stop_date": DAY.timestamp() + 35.0,
+            "grows": True,
+            "reload_s": 30.0,
+        }
+        began, stop = time.monotonic(), threading.Event()
+        timer = threading.Timer(6.0, stop.set)  # (bounds a run that waits for the reload)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        try:
+            media(server.url + "/rec.m3u8", live_delay=1.0, window=window, stop=stop)
+        except Exception:
+            pass
+        self.assertLess(time.monotonic() - began, 5.0)  # never the 30 s reload
+        self.assertEqual(requested_segments(server), ["r1.ts", "r2.ts", "r3.ts"])
+        self.assertEqual(server.counts["/rec.m3u8"], 1)
+
     def test_a_growing_recording_goes_on_past_its_ended_listing_to_its_stop(self):
         # Kick's says ENDLIST while it grows in steps: read again, on to the stop.
         def playlist(_request, count):

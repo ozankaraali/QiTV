@@ -2237,6 +2237,15 @@ class HlsSource:
         self._part_date = _date_of(segments[index]) if index < len(segments) else None
         return index
 
+    def _reaches_stop(self, segment: Any, at: float) -> bool:
+        """A recording part's piece at place `at` that ends at or past its stop (2.15): its
+        last (the next is not waited for: it may not be listed yet, Kick's growing in steps)."""
+        length = float(segment.duration or 0)
+        dated = _date_of(segment)
+        if dated is not None and self._stop_date is not None:
+            return dated + length >= self._stop_date - _STOP_SLACK_S
+        return self._stop_s is not None and at + length >= self._stop_s - _STOP_SLACK_S
+
     def _past_stop(self, segment: Any, at: float) -> bool:
         """A recording part's piece that begins at or after its stop (2.15): by its date
         when it has one, else by its place `at` in the listing."""
@@ -2479,6 +2488,9 @@ class HlsSource:
                 self._serial += 1
                 self._sequence, self._dated = sequence, _date_of(segment)
                 yield from self._segment(segment, sequence, url)
+                if self._recording and self._reaches_stop(segment, at):
+                    done = True  # 2.15: its last piece, the one reaching the buffer's start
+                    break
             self._fetching = 0.0
             if fresh and not again:
                 progress = time.monotonic()

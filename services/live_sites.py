@@ -581,9 +581,11 @@ def _vod_master(
 
 
 def _source_variant(master_url: str, text: str) -> str:
-    """The source variant's media playlist of a master (the highest bandwidth VLC plays a
-    film in: H.264 or HEVC, then any), absolute; the address itself when it is a media
-    playlist. "refused" for a master that names none."""
+    """The source variant's media playlist of a master, absolute: of those VLC plays a film
+    in (H.264 or HEVC; else any), the tallest picture, then the higher frame rate, then the
+    higher bandwidth (Kick's masters declare a 1080p60 source at less bandwidth than its
+    720p60, measured 2026-11-25); the address itself when it is a media playlist. "refused"
+    for a master that names none."""
     try:
         playlist = m3u8.loads(text, uri=master_url)
     except Exception:
@@ -592,19 +594,22 @@ def _source_variant(master_url: str, text: str) -> str:
         if playlist.segments:
             return master_url
         raise SiteError("refused")
-    best: tuple[int, int, str] | None = None
+    best: tuple[tuple[int, int, int, int], str] | None = None
     for variant in playlist.playlists:
         info = variant.stream_info
         codecs = (info.codecs or "").lower()
         film = not codecs or any(
             codec.strip().split(".", 1)[0] in _FILM_CODECS for codec in codecs.split(",")
         )
-        rank = (1 if film else 0, int(info.bandwidth or 0), urljoin(master_url, variant.uri))
-        if best is None or rank[:2] > best[:2]:
-            best = rank
+        size = info.resolution
+        height = int(size[1]) if isinstance(size, tuple) and len(size) == 2 else 0
+        rate = round(float(info.frame_rate or 0))
+        rank = (1 if film else 0, height, rate, int(info.bandwidth or 0))
+        if best is None or rank > best[0]:
+            best = (rank, urljoin(master_url, variant.uri))
     if best is None:
         raise SiteError("refused")
-    return best[2]
+    return best[1]
 
 
 def _variant_of(master_url: str, http: requests_types.Session, stop: threading.Event | None) -> str:

@@ -650,6 +650,23 @@ class KickMediaTests(unittest.TestCase):
         self.assertEqual(self.reason(self.serve(clip=(404, JSON, b"{}")), CLIP), "unknown")
 
 
+class SourceVariantTests(unittest.TestCase):
+    def test_the_tallest_picture_wins_whatever_bandwidth_it_declares(self):
+        # Measured 2026-11-25: a Kick master declared its 1080p60 source at 2.0 Mb/s, its
+        # 720p60 at 3.3 Mb/s.
+        master = (
+            "#EXTM3U\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=2020000,CODECS="avc1.64002A,mp4a.40.2",'
+            "RESOLUTION=1920x1080,FRAME-RATE=60.000\n1080p60/playlist.m3u8\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=3330000,CODECS="avc1.4D401F,mp4a.40.2",'
+            "RESOLUTION=1280x720,FRAME-RATE=60.000\n720p60/playlist.m3u8\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=9000000,CODECS="avc1.4D401F,mp4a.40.2",'
+            "RESOLUTION=1920x1080,FRAME-RATE=30.000\n1080p30/playlist.m3u8\n"
+        )
+        chosen = live_sites._source_variant("https://v.invalid/hls/master.m3u8", master)
+        self.assertEqual(chosen, "https://v.invalid/hls/1080p60/playlist.m3u8")
+
+
 class RecordingTests(unittest.TestCase):
     def test_twitch_the_running_broadcasts_video(self):
         archive = {"id": "123", "status": "RECORDING", "createdAt": "2026-11-25T16:06:52Z"}
