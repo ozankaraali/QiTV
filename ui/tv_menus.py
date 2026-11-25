@@ -115,7 +115,7 @@ class TVMenus(QObject):
         file_menu = bar.addMenu(tr("File"))  # i18n: the menu bar's File menu
         add(file_menu, tr("Open File…"), "Ctrl+O", screens.open_file)
         # i18n: a menu entry (plan 4): a stream's link plays, a provider's goes to Add provider
-        add(file_menu, tr("Open Link…"), "", window.open_link)
+        add(file_menu, tr("Open Link…"), "Ctrl+N", window.open_link)
         # i18n: a menu entry (Plan 4): a folder chosen plays, and goes on the Library's Folders tab
         add(file_menu, tr("Open Folder…"), "Ctrl+Shift+O", screens.open_folder)
         export = file_menu.addMenu(tr("Export"))  # i18n: a submenu of File (verb)

@@ -207,6 +207,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+4"): (("transport", "grid"),),
     ("menu", "Ctrl+5"): (("library", "recordings"), ("drawer", "Recordings")),  # 2.9.7
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
+    ("menu", "Ctrl+N"): (("drawer", "Open a link"),),  # File → Open Link…
     # Plan 4: File → Open Folder…: the Folders tab's Add folder tile (2.11.1: the tab is always
     # there, an empty one too) and the channel list's row under Open file
     ("menu", "Ctrl+Shift+O"): (("folders", "add"), ("drawer", "Open a folder")),
@@ -276,6 +277,7 @@ AUDIO_ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     # The channel list (Return) and what it holds: Live TV, then a click on the picture.
     ("player", "Return"): _LIBRARY,
     ("menu", "Ctrl+O"): _LIBRARY,  # its Open file
+    ("menu", "Ctrl+N"): _LIBRARY,  # its Live TV's channel list (Open a link)
     # its Live TV's channel list (Open a folder), and its Folders tab's Add folder
     ("menu", "Ctrl+Shift+O"): _LIBRARY,
     ("menu", "Ctrl+,"): _LIBRARY,  # its ⚙ (2.14)
