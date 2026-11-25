@@ -39,6 +39,10 @@ class VideoSurface(QWidget):
         self._pointer.press(event.button())
         if event.button() == Qt.MouseButton.RightButton:
             self.contextRequested.emit(event.globalPosition().toPoint())
+            # The menu's press, kept here as the overlay host keeps it: passed on to the page
+            # under, the menu just opened took it for a click elsewhere and closed (issue 53).
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
