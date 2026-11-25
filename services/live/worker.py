@@ -75,6 +75,9 @@ Commands (parent to helper):
   a stopped one may still be finishing. Answered by "recorded";
 - `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
   one that records nothing, is ignored;
+- `("join", part_sid, live_sid, seq)` (2.15): a recording part's viewer stream goes on, once
+  its ring ends, into the live session's from segment `seq` (`StreamServer.join`), its clock
+  re-based so it runs on.
 - `("until", sid, seq)` (2.7): a server part's stop moves to media sequence `seq` (the live
   buffer's start moved); unanswered;
 - `("shutdown",)`.
@@ -1130,7 +1133,11 @@ class _Session:
                 from services.live.recorder import RecordedReads
 
                 reads = RecordedReads(ring, lambda: self._recorder)
-                self._helper.server.add_session(self.sid, reads, self._is_ended)
+                window = self._start.get("window")
+                joins = isinstance(window, dict) and isinstance(window.get("from_s"), (int, float))
+                self._helper.server.add_session(
+                    self.sid, reads, self._is_ended, program=self._program, joins=joins
+                )
         if cancelled:
             self._helper.forget_ring(ring)
             # 2.6: a helper going down keeps a labelled buffer (one being taken back too).
@@ -1787,6 +1794,12 @@ class _Session:
             part_media = getattr(source, "part_media_s", None)
             if part_media is not None:
                 snapshot["part_media_s"] = float(part_media)
+            # 2.15: a recording part's first piece (its place in the listing, its date) and
+            # how much its listing lists now (a growing recording's reach).
+            for key in ("part_start_s", "part_date", "listed_s"):
+                value = getattr(source, key, None)
+                if isinstance(value, (int, float)):
+                    snapshot[key] = float(value)
             dates = list(self._dates)  # (placed by the session thread meanwhile)
             if dates:
                 # A dated source's dates on the timeline (`_place_date`), the oldest first:
@@ -1812,6 +1825,11 @@ class _Session:
     def _is_ended(self) -> bool:
         """Readers end at the ring's end: the input ended, or the session is parked."""
         return self._ended or self._parked
+
+    def _program(self) -> tuple[int | None, int | None]:
+        """The stream's video PID and stream type as its segmenter reads them (None: not yet;
+        the stream server's join re-bases by them, 2.15)."""
+        return self._segmenter.video_pid, self._segmenter.video_type
 
     def _send(self, message: tuple[Any, ...]) -> None:
         self._helper.send(message, self)
@@ -2061,6 +2079,15 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.set_until(command[2])
+            elif name == "join":  # 2.15: a recording part's stream goes on into the buffer
+                if (
+                    len(command) != 4
+                    or not isinstance(command[1], str)
+                    or not isinstance(command[2], str)
+                    or type(command[3]) is not int
+                ):
+                    raise ValueError("a join needs two sessions and a segment")
+                self.server.join(command[1], command[2], command[3])
             elif name == "junction":  # 2.8.5: what stay-live asks the next restart to take
                 if (
                     len(command) != 3

@@ -3041,6 +3041,71 @@ video.m3u8
         self.assertEqual(parts, joined(self.video, self.next_video))
         self.assertEqual(requested_segments(server), ["s106.ts", "s107.ts"])
 
+    @staticmethod
+    def recording(names, *, piece=10, ended=True, dated=True):
+        """A site's recording of the running broadcast as Kick lists it: 10 s pieces from
+        piece 0, each dated (`DAY` on), EVENT, and ENDLIST while it still grows."""
+        text = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:13\n#EXT-X-PLAYLIST-TYPE:EVENT\n"
+        text += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        for n, name in enumerate(names):
+            if dated:
+                text += f"#EXT-X-PROGRAM-DATE-TIME:{stamp(n * piece)}\n"
+            text += f"#EXTINF:{piece}.000,\n{name}\n"
+        return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
+
+    def test_a_recording_part_starts_at_its_moment_and_stops_at_the_buffers_date(self):
+        # 2.15: the site's recording of the running broadcast from the piece holding the
+        # moment asked, its input ending at the piece edge where the buffer begins (by date).
+        names = [f"r{n}.ts" for n in range(6)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/rec.m3u8"] = (200, {}, self.recording(names))
+        server = self.server(routes)
+        window = {"from_s": 25.0, "stop_s": 999.0, "stop_date": DAY.timestamp() + 50.0}
+        source = open_source(
+            server.url + "/rec.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            live_delay=1.0,
+            window=window,
+        )
+        drain(source)
+        self.assertEqual(requested_segments(server), ["r2.ts", "r3.ts", "r4.ts"])
+        self.assertEqual(source.part_start_s, 20.0)
+        self.assertEqual(source.part_date, DAY.timestamp() + 20.0)
+        self.assertEqual(source.listed_s, 60.0)
+        self.assertIsNone(source.part_wall)  # (placed by its date, never its arrival)
+
+    def test_an_undated_recording_part_stops_by_its_place_in_the_listing(self):
+        # Twitch's lists no dates: its stop is its place, the recording's start counted on.
+        names = [f"r{n}.ts" for n in range(6)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/rec.m3u8"] = (200, {}, self.recording(names, ended=False, dated=False))
+        server = self.server(routes)
+        window = {"from_s": 0.0, "stop_s": 30.0, "stop_date": DAY.timestamp() + 30.0}
+        media(server.url + "/rec.m3u8", live_delay=1.0, window=window)
+        self.assertEqual(requested_segments(server), ["r0.ts", "r1.ts", "r2.ts"])
+
+    def test_a_growing_recording_goes_on_past_its_ended_listing_to_its_stop(self):
+        # Kick's says ENDLIST while it grows in steps: read again, on to the stop.
+        def playlist(_request, count):
+            listed = 3 if count == 1 else 6
+            return 200, {}, self.recording([f"r{n}.ts" for n in range(listed)])
+
+        routes = {f"/r{n}.ts": (200, {}, self.video) for n in range(6)}
+        routes["/rec.m3u8"] = playlist
+        server = self.server(routes)
+        window = {
+            "from_s": 0.0,
+            "stop_s": 999.0,
+            "stop_date": DAY.timestamp() + 40.0,
+            "grows": True,
+            "reload_s": 0.05,
+        }
+        media(server.url + "/rec.m3u8", live_delay=1.0, window=window)
+        self.assertEqual(requested_segments(server), ["r0.ts", "r1.ts", "r2.ts", "r3.ts"])
+        self.assertGreaterEqual(server.counts["/rec.m3u8"], 2)
+
     def test_a_server_part_whose_start_left_the_window_goes_on_from_its_oldest(self):
         # Review Focus 2: near the window's oldest end the window slides past the next
         # segment; the part goes on from the window's oldest, not from the live end.

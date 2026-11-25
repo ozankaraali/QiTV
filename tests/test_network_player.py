@@ -1530,6 +1530,34 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertEqual(self.external.calls, [])
         self.assertEqual(len(self.asked), 1)
 
+    def test_a_channel_that_plays_through_its_buffer_rewinds_into_its_sites_recording(self):
+        # 2.15: once the channel plays through its buffer, its site is asked (on a worker)
+        # for the running broadcast's recording, once a tune; the live session takes it.
+        asked = []
+
+        def running(page, stop=None, **_kwargs):
+            asked.append((page, threading.current_thread() is threading.main_thread()))
+            return live_sites.Recording(
+                "https://rec.example/1080p60/playlist.m3u8", 6_400.0, True, True
+            )
+
+        self.enterContext(mock.patch.object(live_sites, "running_recording", running))
+        self.answers = [MASTER]
+        self.link(KICK_PAGE)
+        self.live.play_pipeline()
+        self.assertEqual(asked, [])  # never before its picture: the timed start waits for nothing
+        self.plays_now()
+        self.assertTrue(wait_until(lambda: self.live.named("set_site_recording")))
+        (route,) = self.live.named("set_site_recording")[0]
+        self.assertEqual(
+            (route.url, route.start, route.dated, route.steps),
+            ("https://rec.example/1080p60/playlist.m3u8", 6_400.0, True, True),
+        )
+        self.assertEqual(asked, [(SitePage(KICK, "examplechannel"), False)])  # off the GUI
+        self.plays_now()  # it plays again (a reopen): asked once a tune
+        pause(100)
+        self.assertEqual(len(asked), 1)
+
     def test_history_keeps_the_page_not_the_token(self):
         self.answers = [MASTER]
         with self.assertLogs(level="DEBUG") as logs:

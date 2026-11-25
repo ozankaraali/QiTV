@@ -28,6 +28,7 @@ from services.live.live_session import (
     WINDOW_BAR_S,
     LiveSession,
 )
+from services.live.server_part import RecordingRoute
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS, Decision, StayLive
 from services.live.timeline import Span
@@ -95,6 +96,7 @@ class FakeEngine(QObject):
         self.untils = []  # (sid, seq): a server part's stop moved (2.7)
         self.junctions = []  # (sid, seconds): what a session's next restart is asked (2.8.5)
         self.retry_nows = []  # sids asked to try their channel's stream again now
+        self.joins = []  # (part sid, live sid, seq): a recording part's stream goes on (2.15)
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -150,6 +152,9 @@ class FakeEngine(QObject):
 
     def retry_now(self, sid):
         self.retry_nows.append(sid)  # the picture's Try now while the channel is down
+
+    def join(self, sid, live_sid, seq):
+        self.joins.append((sid, live_sid, seq))  # 2.15
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -214,6 +219,8 @@ class FakeEngine(QObject):
         ad_break=None,
         dates=None,
         piece=None,
+        part_date=None,
+        part_start=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -255,6 +262,10 @@ class FakeEngine(QObject):
             self._snapshots[sid]["dates"] = [list(entry) for entry in dates]
         if piece is not None:  # an HLS source's piece length (its EXTINF)
             self._snapshots[sid]["piece_s"] = piece
+        if part_date is not None:  # 2.15: a recording part's first piece's date
+            self._snapshots[sid]["part_date"] = part_date
+        if part_start is not None:  # ... and its place in the recording's listing
+            self._snapshots[sid]["part_start_s"] = part_start
         if video is not None:
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
@@ -8645,6 +8656,142 @@ class ArchivePartTests(LiveSessionCase):
         self.assertEqual(len(self.engine.opened), 1)  # the archive waits for the park
         self.engine.sessionParked.emit(sid)
         self.assertEqual(self.engine.opened[-1][1], "http://archive.test/9060.ts")
+
+
+class SiteRecordingTests(LiveSessionCase):
+    """2.15 (the owner: "a fluid back and forth"): a Kick or Twitch channel's site keeps the
+    running broadcast's recording: the bar runs from the broadcast's start through it and the
+    buffer to live; a rewind past the buffer plays it, placed by its pieces' dates on the
+    buffer's own; playing forward goes on into the buffer as one stream (nothing reopens)."""
+
+    SPANS = [Span(n, 2.0 * n, 2.0 * n + 2.0, False, media_seq=500 + n) for n in range(100)]
+    URL = "https://rec.test/abc/1080p60/playlist.m3u8"
+
+    def playing(self, *, dated=True, spans=None):
+        """A dated 200 s buffer (2 s pieces from media sequence 500) whose second 0 is dated
+        10,000 (Unix seconds; now 10,200), and its site's recording from 6,400 on."""
+        self.live._wall = lambda: 10_200.0
+        sid = self.start()
+        self.engine.buffer(
+            sid,
+            spans or self.SPANS,
+            hls=True,
+            window=28.0,
+            parts=[[0, 0.0, 10_000.0]],
+            dates=[[0.0, 10_000.0]],
+        )
+        self.engine.sessionReady.emit(sid)
+        self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=dated, steps=True))
+        return sid
+
+    def in_recording(self, at, own, **placed):
+        """A seek to `at` opened the recording: its own spans `own`, placed by `placed`."""
+        self.live.seek_to(at)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, own, hls=True, **placed)
+        self.engine.sessionReady.emit(part)
+        return part
+
+    def test_the_bar_covers_the_whole_broadcast(self):
+        self.playing()
+        self.assertEqual(self.live.server_window(), 3_600.0)
+        self.live._emit_timeline()
+        state = self.timelines[-1]
+        self.assertEqual((state["start"], state["window_start"]), (-3_600.0, -3_600.0))
+        self.assertEqual(state["buffer_start"], 0.0)
+        self.assertNotIn("archive_part", state)
+
+    def test_a_rewind_opens_the_recording_from_its_moment_to_the_buffers_start(self):
+        sid = self.playing()
+        self.live.seek_to(-1_800.0)
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertNotEqual(part, sid)
+        self.assertEqual(url, self.URL)
+        self.assertEqual(
+            kwargs["window"],
+            {
+                "from_s": 1_800.0,
+                "stop_s": 3_600.0,
+                "stop_date": 10_000.0,
+                "grows": True,
+                "ahead_s": WINDOW_AHEAD_S,
+                "reload_s": 30.0,
+            },
+        )
+
+    def test_it_is_placed_by_its_first_pieces_date(self):
+        self.playing()
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=n) for n in range(3)]
+        part = self.in_recording(-1_800.0, own, part_date=8_195.0, part_start=1_795.0)
+        # Its piece holding 8,200 (the moment asked) plays, from -1,805 on the bar.
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
+        self.assertAlmostEqual(self.live.position(), -1_805.0)
+        self.assertTrue(self.live.in_server_part())
+
+    def test_an_undated_one_is_placed_by_its_start_and_what_comes_before(self):
+        self.playing(dated=False)
+        own = [Span(0, 0.0, 10.0, False, media_seq=0), Span(1, 10.0, 20.0, False, media_seq=1)]
+        part = self.in_recording(-1_800.0, own, part_start=1_790.0)
+        # 6,400 + 1,790 = 8,190: its second 0 is the bar's -1,810; -1,800 is its second piece's.
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.assertAlmostEqual(self.live.position(), -1_800.0)
+
+    def advance(self, seconds, step=0.25):
+        for _ in range(round(seconds / step)):
+            self.clock.now += step
+            self.playback.ms += round(step * 1000)
+            self.live._tick()
+
+    def test_playing_forward_goes_on_into_the_buffer_as_one_stream(self):
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
+        self.engine.sessionEnded.emit(part)  # its input reached its stop: the buffer's start
+        self.assertEqual(self.engine.joins, [(part, sid, 0)])  # the buffer's second 0
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        positions = []
+        for _ in range(4):
+            self.advance(6.0)
+            positions.append(self.live.position())
+        self.assertEqual(len(self.playback.plays), plays)  # nothing reopened at the join
+        self.assertEqual(positions, sorted(positions))  # never back
+        self.assertFalse(self.live.in_server_part())  # in the buffer now
+        self.assertGreater(positions[-1], 0.0)
+        self.assertNotIn(part, self.engine.closed)  # kept: a seek back plays it again
+        opens = len(self.engine.opened)
+        self.live.seek_to(-8.0)  # back across the join
+        self.assertEqual(len(self.engine.opened), opens)  # locally, from what it brought
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.assertTrue(self.live.in_server_part())
+
+    def test_where_no_buffer_segment_begins_there_vlc_opens_the_buffer_at_its_end(self):
+        spans = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=500 + n) for n in range(30)]
+        sid = self.playing(spans=spans)
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 23.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 3.0: no buffer segment begins there
+        self.assertEqual(self.engine.joins, [])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.playback.ended.emit()  # VLC read it to its end
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
+        self.assertFalse(self.live.in_server_part())
+
+    def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=0)]
+        part = self.in_recording(-1_800.0, own, part_date=8_195.0)
+        self.live.go_live()
+        self.assertIn(part, self.engine.closed)
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(self.live.server_window(), 3_600.0)  # it stands: the bar still reaches
+        self.engine.answer()
+        self.start()
+        self.engine.buffer(self.engine.last_sid, self.SPANS, hls=True, dates=[[0.0, 10_000.0]])
+        self.engine.sessionReady.emit(self.engine.last_sid)
+        self.assertNotEqual(self.engine.last_sid, sid)
+        self.assertEqual(self.live.server_window(), 0.0)  # another tune: its own, once asked
 
 
 class ServerWindowFixTests(LiveSessionCase):

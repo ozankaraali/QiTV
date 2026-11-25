@@ -313,7 +313,7 @@ class _Supervisor(QThread):
             if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
-        if name in ("until", "junction", "retry_now"):  # never the close fallback below
+        if name in ("until", "junction", "retry_now", "join"):  # never the close fallback below
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
             return
@@ -1019,6 +1019,13 @@ class LiveEngine(QObject):
         view = self._sessions.get(sid)
         if view is not None and not view.closing and not self._shut:
             self._commands.put(("until", sid, int(seq)))
+
+    def join(self, sid: str, live_sid: str, seq: int) -> None:
+        """2.15: the viewer's stream of recording part `sid` goes on, once its ring ends, into
+        live session `live_sid`'s from segment `seq` (one stream, its clock running on)."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("join", sid, live_sid, int(seq)))
 
     def retry_now(self, sid: str) -> None:
         """Have a session whose channel's stream is down try it again now, instead of after

@@ -147,6 +147,39 @@ class SiteJob(QObject):
         self.finished.emit(answer)
 
 
+class RecordingJob(QObject):
+    """2.15: a live site channel's running broadcast's recording asked of its site, on the
+    runner's thread (services.live_sites.running_recording): `finished` with it (a
+    `live_sites.Recording`, or None: its site keeps none), else `error` with why. `stop` set
+    ends it between its requests."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, page: SitePage, stop: threading.Event) -> None:
+        super().__init__()
+        self.page = page
+        self.stop = stop
+
+    def run(self) -> None:
+        try:
+            found = live_sites.running_recording(self.page, self.stop)
+        except live_sites.SiteError as e:
+            self.error.emit(e.reason)
+            return
+        except Exception as e:  # (its text may carry an address: its type only)
+            logger.warning(
+                "Asking %s for %s's recording failed (%s)",
+                SITE_NAMES.get(self.page.site, self.page.site),
+                self.page.channel,
+                type(e).__name__,
+            )
+            logger.debug("%s", safe_traceback(e))
+            self.error.emit("network")
+            return
+        self.finished.emit(found)
+
+
 def _quality(target: Target) -> dict:
     """The link request's quality argument: only when the quality menu chose one (2.8)."""
     return {"quality": target.quality} if target.quality is not None else {}

@@ -853,6 +853,9 @@ class FakeLiveSession(QObject):
     def set_aside(self):  # 2.6: its recording goes on while its channel was left
         self.calls.append(("set_aside",))
 
+    def set_site_recording(self, route):  # 2.15: the site's recording of the broadcast
+        self.calls.append(("set_site_recording", route))
+
     def bring_back(self):
         self.calls.append(("bring_back",))
 

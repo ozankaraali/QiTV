@@ -76,6 +76,7 @@ from services.i18n import N_, tr, tr_n, translate
 from services.live import parts as live_parts
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
+from services.live.server_part import RecordingRoute
 from services.live.tuning import channel_key
 from services.network_streams import DOWN, failure_reason, shown_reason
 from services.playback import PlaybackState
@@ -262,6 +263,9 @@ class LiveControls(QObject):
         site_page: Callable[[dict], Optional[str]] = lambda item: None,
         reask: Optional[Callable[[str, Callable[[str], None], Callable[[str], None]], None]] = None,
         waits_for_live: Callable[[Target, str], bool] = lambda target, why: False,
+        recording_of: Optional[
+            Callable[[str, Callable[[object], None]], Callable[[], None]]
+        ] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`explain(item, title)` asks why the failure just toasted happened at the item's
@@ -282,9 +286,15 @@ class LiveControls(QObject):
         page of a link that is a site's channel (Kick, Twitch), whose address lasts minutes:
         its reopen asks the site again, `reask(page, ok, failed)` (answered on this thread);
         `waits_for_live(target, why)`: one its site says is not live waits for it (the shell's:
-        it is then the large picture's, and counted in its row), False where it does not."""
+        it is then the large picture's, and counted in its row), False where it does not.
+        `recording_of(page, then)` (2.15): asks a site channel's site for its running
+        broadcast's recording once the channel plays through its buffer (`then(recording)`
+        on this thread; returns what stops the ask): the live session then rewinds into it."""
         super().__init__(parent)
         self._waits_for_live = waits_for_live
+        self._recording_of = recording_of
+        self._recording_asked: Optional[Target] = None  # the target asked for (once a tune)
+        self._recording_stop: Callable[[], None] = lambda: None
         self._link = link
         self._link_failed = link_failed
         self._site_page = site_page
@@ -508,6 +518,9 @@ class LiveControls(QObject):
         self.catchup.reset()
 
     def _forget_channel(self) -> None:
+        self._recording_stop()  # 2.15: an ask for the old channel's recording ends unanswered
+        self._recording_stop = lambda: None
+        self._recording_asked = None
         self._ticks = []
         self._reconnects = 0
         self._link_tries = 0
@@ -1167,6 +1180,45 @@ class LiveControls(QObject):
         self._link_well_since = self._playing_since
         if not self._retry_from_live:
             self._hide_retry()
+        self._ask_recording()
+
+    def _ask_recording(self) -> None:
+        """2.15: a Kick or Twitch channel that plays through its buffer has its site asked,
+        once a tune, for the running broadcast's recording; the live session then rewinds
+        past the buffer into it (`LiveSession.set_site_recording`). Never for a zap step
+        passed (it never plays), and never before the picture: the timed start waits for
+        nothing."""
+        current, live = self._current(), self.live
+        if (
+            self._recording_of is None
+            or current is None
+            or live is None
+            or self._recording_asked is current
+            or not self.pipeline_live()
+        ):
+            return
+        page = self._site_page(current.item)
+        setter = getattr(live, "set_site_recording", None)
+        if page is None or setter is None:
+            return
+        self._recording_asked = current
+
+        def then(found: object) -> None:
+            if self._closed() or self._current() is not current or self.live is not live:
+                return
+            url = getattr(found, "url", None)
+            start = getattr(found, "start", None)
+            if not isinstance(url, str) or not isinstance(start, float):
+                return
+            route = RecordingRoute(
+                url,
+                start,
+                bool(getattr(found, "dated", False)),
+                bool(getattr(found, "steps", False)),
+            )
+            setter(route)
+
+        self._recording_stop = self._recording_of(page, then)
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""

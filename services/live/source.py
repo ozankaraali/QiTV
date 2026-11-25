@@ -132,6 +132,11 @@ _INIT_LIMIT = 4 * 1024 * 1024  # an fMP4 init segment (EXT-X-MAP): some kilobyte
 _EDIT_KEEP_S = 1.0
 # A live playlist without a new segment for this long is frozen.
 _FROZEN_TIMEOUT = 60.0
+# 2.15: a site's recording of the running broadcast (a recording part) grows in steps (Kick:
+# 30-60 s): its listing stands still this long before it counts as frozen
+_RECORDING_FROZEN_S = 240.0
+# ... and its stop takes a piece that begins this little before it as at it (a date's rounding)
+_STOP_SLACK_S = 0.05
 # An older playlist copy that overlaps recent segments is waited out this many targets.
 _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
@@ -1846,7 +1851,13 @@ class HlsSource:
         playlist's end and its input ends before that media
         sequence (the live buffer's first), placed in time by `part_wall`; a provider
         archive's, `{"until_s": seconds}`, starts at its first segment (the helper ends it
-        at that much media). `heights` and `height` (2.8): its master's picture sizes and the
+        at that much media). 2.15, a site's recording of the running broadcast (a recording
+        part): `{"from_s", "stop_s", "stop_date", "grows", "reload_s"}`: it starts at the piece
+        holding `from_s` seconds of its listing and its input ends before the first piece
+        that begins at or after `stop_date` (its PROGRAM-DATE-TIME, Unix seconds; an undated
+        piece: at `stop_s` of its listing), a piece's edge; `grows`: its listing goes on
+        though it says it ends (Kick's says ENDLIST while it grows), read again every
+        `reload_s` until its stop. `heights` and `height` (2.8): its master's picture sizes and the
         variant's; `max_height`: the cap it was chosen under, which a reload's keeps.
         `after_seq` (2.8): a resumed run's start goes on after that media sequence (the run it
         joins, `_start`). `copy`: the bytes `playlist` was parsed from, when its address
@@ -1863,6 +1874,19 @@ class HlsSource:
         back = window.get("back_s") if window is not None else None
         if window is not None and back is None and _archive_window(window):
             back = math.inf  # 2.7: a provider archive's playlist begins at the moment asked
+        # 2.15: a site's recording of the running broadcast (`_recording_window`)
+        recording = window is not None and _recording_window(window)
+        self._recording = recording
+        self._from = _seconds(window.get("from_s")) if recording and window else None
+        self._stop_s = _seconds(window.get("stop_s")) if recording and window else None
+        self._stop_date = _seconds(window.get("stop_date")) if recording and window else None
+        self._grows = bool(window.get("grows")) if recording and window else False
+        self._reload_s = _seconds(window.get("reload_s")) if recording and window else None
+        self._part_start: float | None = None  # its first piece's place in its listing (s)
+        self._part_date: float | None = None  # ... and that piece's date (None: undated)
+        self._listed = 0.0  # how much its listing lists, as last read (s)
+        if recording:
+            back = math.inf
         before = window.get("before_s") if window is not None else None
         until = window.get("until_seq") if window is not None else None
         self._back = float(back) if isinstance(back, (int, float)) else None
@@ -1990,6 +2014,21 @@ class HlsSource:
     def part_wall(self) -> float | None:
         """A server part's first segment's time of day (2.7); None before it, or else."""
         return self._part_wall
+
+    @property
+    def part_start_s(self) -> float | None:
+        """A recording part's first piece's place in its listing, in seconds (2.15)."""
+        return self._part_start
+
+    @property
+    def part_date(self) -> float | None:
+        """A recording part's first piece's PROGRAM-DATE-TIME (Unix seconds; 2.15)."""
+        return self._part_date
+
+    @property
+    def listed_s(self) -> float | None:
+        """How much a recording part's listing lists now, in seconds (2.15); None else."""
+        return self._listed if self._recording else None
 
     @property
     def edge_sequence(self) -> int | None:
@@ -2153,6 +2192,8 @@ class HlsSource:
         session picks its start at the target from what it brings, at once. A resumed run
         still joins its earlier one as far back as the depth."""
         finished = playlist.segments[: _finished(playlist.segments)]
+        if self._recording:
+            return self._recording_start(finished)
         if self._back is not None:
             segments, first = finished, playlist.media_sequence or 0
             until = self._until
@@ -2177,6 +2218,32 @@ class HlsSource:
             if depth <= following <= len(playlist.segments):
                 return following
         return start
+
+    def _recording_start(self, segments: Sequence[Any]) -> int:
+        """A recording part's first piece (2.15): the one holding `from_s` seconds of its
+        listing (past what it lists yet: after its last, to come as it grows); its place and
+        date are kept for the session, which places the part by them."""
+        at = 0.0
+        index = 0
+        wanted = self._from or 0.0
+        for index, segment in enumerate(segments):
+            length = float(segment.duration or 0)
+            if at + length > wanted:
+                break
+            at += length
+        else:
+            index = len(segments)
+        self._part_start = at
+        self._part_date = _date_of(segments[index]) if index < len(segments) else None
+        return index
+
+    def _past_stop(self, segment: Any, at: float) -> bool:
+        """A recording part's piece that begins at or after its stop (2.15): by its date
+        when it has one, else by its place `at` in the listing."""
+        dated = _date_of(segment)
+        if dated is not None and self._stop_date is not None:
+            return dated >= self._stop_date - _STOP_SLACK_S
+        return self._stop_s is not None and at >= self._stop_s - _STOP_SLACK_S
 
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
@@ -2310,10 +2377,12 @@ class HlsSource:
                     self._prefetched.clear()
             other, ours = None, loaded
             self._note_window(playlist)
+            if self._recording:
+                self._listed = sum(float(s.duration or 0) for s in playlist.segments)
             if next_sequence is None:
                 start = self._start(playlist)
                 next_sequence = first + start
-                if self._back is not None:  # 2.7: where the server part sits in time
+                if self._back is not None and not self._recording:  # 2.7: where it sits
                     listed = playlist.segments[start : _finished(playlist.segments)]
                     after = sum(float(s.duration or 0) for s in listed)
                     self._part_wall = _wall_time() - after
@@ -2356,14 +2425,20 @@ class HlsSource:
                 ads_said = True
                 log.info("The HLS playlist listed only ad pieces for %.0f s.", _AD_MAX_S)
             # Frozen time runs between reloads only, never while segments download.
-            if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
+            frozen = _RECORDING_FROZEN_S if self._recording else _FROZEN_TIMEOUT
+            if not fresh and loaded - progress >= frozen:
                 raise SourceError("timeout", _FROZEN)
             done = again = False  # 2.7: a server part reached its stop / reloads first
             made = False  # the batch reached its prefetch pieces
+            place = 0.0  # 2.15: a recording part's piece's place in its listing
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
+                at, place = place, place + float(segment.duration or 0)
                 if sequence < next_sequence:
                     continue
+                if self._recording and self._past_stop(segment, at):
+                    done = True  # 2.15: its stop, a piece's edge (no hold: nothing is fetched)
+                    break
                 held = time.monotonic()
                 while self._hold is not None and self._hold():  # its stop may move meanwhile
                     if http.wait(_HOLD_POLL_S):
@@ -2408,7 +2483,8 @@ class HlsSource:
             if fresh and not again:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
-            if done or (playlist.is_endlist and not again):  # a held one reloads, goes on
+            ended = playlist.is_endlist and not self._grows  # (2.15: a growing recording's)
+            if done or (ended and not again):  # a held one reloads, goes on
                 if self._ad_break:
                     yield from self._ad_break_over()
                 yield from self._emit(self._release(final=True))
@@ -2417,6 +2493,8 @@ class HlsSource:
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
             if self._prefetching:
                 interval = _PREFETCH_RELOAD_S
+            elif self._recording and self._grows and self._reload_s:
+                interval = self._reload_s  # 2.15: Kick's recording grows in steps
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
             loaded = time.monotonic()
@@ -3090,6 +3168,16 @@ def _first_answer(
             )
         if http.wait(delay):
             raise _Closed()
+
+
+def _recording_window(window: Mapping[str, Any]) -> bool:
+    """A site's recording of the running broadcast (2.15, a recording part): it starts
+    `from_s` into its listing."""
+    return isinstance(window.get("from_s"), (int, float))
+
+
+def _seconds(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
 def _archive_window(window: Mapping[str, Any]) -> bool:

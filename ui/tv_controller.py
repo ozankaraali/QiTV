@@ -161,7 +161,7 @@ from ui.episode_listing import FolderListing
 from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
-from ui.link_lanes import LinkLanes, SiteJob, Target
+from ui.link_lanes import LinkLanes, RecordingJob, SiteJob, Target
 from ui.live_controls import LiveControls, stream_options
 from ui.live_tuner import LiveTuner, start_kwargs as tune_kwargs
 from ui.mixer_controls import MixerControls
@@ -467,6 +467,7 @@ class TVController(QObject):
             site_page=self._site_page,
             reask=self._reask_site,
             waits_for_live=self._waits_for_live,
+            recording_of=self._site_recording,
             parent=self,
         )
         # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
@@ -1409,6 +1410,30 @@ class TVController(QObject):
             self._resolve_site(page, ok, failed)
         finally:
             self._asking_tune = False
+
+    def _site_recording(self, url: str, then: Callable[[object], None]) -> Callable[[], None]:
+        """2.15: the site of the live channel page `url` asked, on a worker, for its running
+        broadcast's recording: `then(recording)` on this thread (a `live_sites.Recording`,
+        or None: it keeps none, or was not reached). Returns what stops the ask (a newer
+        tune, QiTV closing: `then` is not called after it)."""
+        page = site_page(url)
+        stop = threading.Event()
+        if page is None or self._closed:
+            return stop.set
+        self._site_stops.add(stop)
+
+        def answered(_context: object, found: object) -> None:
+            self._site_stops.discard(stop)
+            if not stop.is_set() and not self._closed:
+                then(found)
+
+        def failed(_context: object, _reason: object) -> None:
+            self._site_stops.discard(stop)
+            if not stop.is_set() and not self._closed:
+                then(None)
+
+        self._jobs.run_worker(RecordingJob(page, stop), answered, failed)
+        return stop.set
 
     def _site_asked(self, stop: threading.Event) -> None:
         """A site's ask ended (answered, or not): nothing more stops it."""

@@ -9,6 +9,15 @@ are copied out with the lease-free `Ring.read_at`: nothing is held across socket
 no segment is pinned against eviction, so the writer never waits for a reader. A reader
 that falls behind eviction has its response ended. Handler errors are silent because
 request paths carry the session token.
+
+2.15, one stream across a join: a session added with `joins` (a site's recording of the running
+broadcast, before the live buffer) may be told to go on into another session's ring (`join`:
+the live buffer's segment where the recording's input stopped). Its viewer's response then goes
+on there once the recording's ring ends, with that segment's tables, its clock re-based onto
+the recording's last picture (`ts.ClockJoiner`: the player sees one stream whose clock runs
+on, so it neither stops nor opens anything), and it reads as the live session's viewer from
+then on. A join whose streams' video differs (another PID or stream type) is not made: the
+response ends there, as before (the player's end opens the buffer there).
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import threading
 from typing import Any
 
 from services.live.ring import Ring, RingError
+from services.live.ts import ClockJoiner
 
 _LOG = logging.getLogger(__name__)
 _CHUNK = 64 * 1024
@@ -64,6 +74,11 @@ class _Session:
     # that client's turn (an older client still open after a reopen no longer moves it).
     reading: int | None = None
     reader: int = 0
+    # 2.15: its stream's video (PID, stream type), and whether its viewer's response may go on
+    # into another session's ring (`StreamServer.join`): where, once its ring ends.
+    program: Callable[[], tuple[int | None, int | None]] = lambda: (None, None)
+    joins: bool = False
+    join: tuple[str, int] | None = None
 
 
 def _wake(ring: Ring) -> None:
@@ -129,15 +144,56 @@ class StreamServer:
             self._thread.start()
         return self._base_url
 
-    def add_session(self, session_id: str, ring: Any, is_ended: Callable[[], bool]) -> None:
-        """`ring`: a `Ring`, or what reads like one (2.6: `recorder.RecordedReads`)."""
+    def add_session(
+        self,
+        session_id: str,
+        ring: Any,
+        is_ended: Callable[[], bool],
+        *,
+        program: Callable[[], tuple[int | None, int | None]] | None = None,
+        joins: bool = False,
+    ) -> None:
+        """`ring`: a `Ring`, or what reads like one (2.6: `recorder.RecordedReads`).
+        `program()`: its stream's video PID and stream type; `joins` (2.15): its viewer's
+        response may go on into another session's ring (`join`)."""
         if not re.fullmatch(_SESSION_ID, session_id):
             raise ValueError("A stream session id must be 1-64 URL-safe characters.")
         with self._lock:
             previous = self._sessions.get(session_id)
-            self._sessions[session_id] = _Session(ring, is_ended)
+            session = _Session(ring, is_ended, joins=joins)
+            if program is not None:
+                session.program = program
+            if previous is not None and previous.join is not None:
+                session.join = previous.join  # (a resumed run's ring: the join stays)
+            self._sessions[session_id] = session
         if previous is not None:
             self._end(previous)
+
+    def join(self, session_id: str, other_id: str, seq: int) -> None:
+        """2.15: the viewer's response of session `session_id` (added with `joins`) goes on,
+        once its ring ends, into session `other_id`'s from segment `seq`."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or not session.joins:
+                return
+            session.join = (other_id, int(seq))
+        _wake(session.ring)
+
+    def _joined(self, session: _Session, client: socket.socket) -> tuple[_Session, int] | None:
+        """The session a joining response goes on in, and its segment, the client moved to
+        it; None when there is none (no join, its session went, or its video differs)."""
+        with self._lock:
+            join = session.join
+            other = self._sessions.get(join[0]) if join is not None else None
+            if join is None or other is None or other.removed or self._stopping:
+                return None
+            ours, theirs = session.program(), other.program()
+            if ours != theirs or ours[0] is None:
+                _LOG.info("A recording's stream does not join the buffer: its video differs.")
+                return None
+            session.clients.discard(client)
+            other.clients.add(client)
+            return other, join[1]
 
     def remove_session(self, session_id: str) -> None:
         with self._lock:
@@ -243,6 +299,7 @@ class _HTTPServer(ThreadingLoopbackHTTPServer):
 
 class _Handler(BaseHTTPRequestHandler):
     server: _HTTPServer
+    _serving: _Session
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -264,12 +321,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._empty(404)
             return
         session, seq, side = attached
+        self._serving = session  # (2.15: the session it reads from now, after a join too)
         try:
             status = self._stream(session, seq, side)
             if status:
                 self._empty(status)
         finally:
-            owner._detach(session, self.connection)
+            owner._detach(self._serving, self.connection)
 
     def _empty(self, status: int) -> None:
         self.send_response(status)
@@ -289,7 +347,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _stream(self, session: _Session, seq: int, side: bool = False) -> int:
         """Stream from segment `seq`; returns the status to send when nothing was sent. A
-        side reader leaves `reading` to the viewer's."""
+        side reader leaves `reading` to the viewer's. 2.15: a joining session's viewer goes on
+        into the session it joins once its ring ends (`StreamServer.join`)."""
         ring = session.ring
         number, offset, started = seq, 0, False
         turn = 0
@@ -297,6 +356,11 @@ class _Handler(BaseHTTPRequestHandler):
             session.reader += 1
             turn = session.reader
             session.reading = number
+        joiner: ClockJoiner | None = None
+        junction = False
+        current = [session]
+        if session.joins and not side:
+            joiner = ClockJoiner(program=lambda: current[0].program())
         while not session.removed:
             # Before the read, so any later append, completion or eviction ends the wait.
             with ring.changed:
@@ -318,11 +382,22 @@ class _Handler(BaseHTTPRequestHandler):
                 self._start()
             if data:
                 # Nothing is held here: this write blocks while the player is paused.
-                self.wfile.write(data)
+                if joiner is None:
+                    self.wfile.write(data)
+                else:
+                    for piece in joiner.feed(data, junction=junction):
+                        self.wfile.write(piece)
+                    junction = False
                 offset += len(data)
                 continue
             if not complete:
                 if ended:
+                    if joiner is not None and session.join is not None:
+                        went = self._go_on(session, joiner, side)
+                        if went is not None:
+                            session, number, turn = went
+                            current[0], ring, offset, junction = session, session.ring, 0, True
+                            continue
                     return 0
                 _wait(session, before)
                 continue
@@ -337,7 +412,32 @@ class _Handler(BaseHTTPRequestHandler):
                 if not side and session.reader == turn:
                     session.reading = number
             elif status != "timeout" or ended:
+                if ended and status == "timeout" and joiner is not None and session.join:
+                    went = self._go_on(session, joiner, side)
+                    if went is not None:
+                        session, number, turn = went
+                        current[0], ring, offset, junction = session, session.ring, 0, True
+                        continue
                 return 0  # the next segment was evicted, the ring closed, or the session ended
             else:
                 _wait(session, before)
         return 0 if started else 404
+
+    def _go_on(
+        self, session: _Session, joiner: ClockJoiner, side: bool
+    ) -> tuple[_Session, int, int] | None:
+        """2.15: a joining session's ring ended: the session it joins and its segment (with
+        that segment's tables: `offset` 0), the response reading as its viewer from now on;
+        None: it ends here."""
+        joined = self.server.owner._joined(session, self.connection)
+        if joined is None:
+            return None
+        other, number = joined
+        self._serving = other
+        turn = 0
+        if not side:
+            other.reader += 1
+            turn = other.reader
+            other.reading = number
+        _LOG.info("A recording's stream goes on into the buffer.")
+        return other, number, turn

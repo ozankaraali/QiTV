@@ -303,7 +303,9 @@ from services.live.raw_audio import decoded
 from services.live.recorder import MAX_SECONDS, MIN_FREE_BYTES
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.server_part import (
+    RECORDING_RELOAD_S,
     ArchiveRoute,
+    RecordingRoute,
     ServerPart,
     back_for,
     buffer_first_media,
@@ -461,6 +463,11 @@ WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
 _ARCHIVE_JOIN_S = 2.0  # an archive part ending this near the buffer's start hops into it
 _PART_SLACK_S = 10.0  # a point this far before a part's start is still played from it
 _PART_STEP_S = 6.0  # a part that broke off having brought less than this has nothing more
+# 2.15: a site's recording reaching at least this far past the buffer is offered on the bar,
+# and its stream joins the buffer's segment that begins this near where it stops (else VLC
+# opens the buffer there, as a part's end does)
+_RECORDING_MIN_S = 1.0
+_JOIN_SLACK_S = 1.0
 _ARCHIVE_STEP_S = 30.0  # one that brought less than this past its point has nothing more
 # VLC's clock, which moved since the open, standing still this long while VLC plays with media
 # ahead and the source sending is lost (`_clock_lost`): it opens again.
@@ -952,6 +959,10 @@ class LiveSession(QObject):
         self._part_again: Optional[float] = None  # a refused part's point, opened again soon
         self._part_resuming = False  # the live upstream parked for a part is opening again
         self._archive: Optional[ArchiveRoute] = None  # the parts are a provider archive's
+        # 2.15: the site's recording of the running broadcast (Kick, Twitch), while the channel
+        # plays, and where a recording part's stream goes on into the buffer (timeline s)
+        self._site_rec: Optional[RecordingRoute] = None
+        self._join_at: Optional[float] = None
         self._said_scheme: Optional[str] = None  # 2.7.1: the session whose scheme the log said
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
@@ -1075,6 +1086,7 @@ class LiveSession(QObject):
         of a provider is waited out there. `radio` (2.14): a radio list's station: every
         stream the helper opens for it reads its sound and names its songs (`stream_title`)."""
         self.stop()
+        self._site_rec = None  # (2.15: the new channel's is asked of its site as it plays)
         self._played, self._revive_on, self._once = False, revive, once
         self._failure = ("", None)
         self._revive.reset()
@@ -1568,10 +1580,17 @@ class LiveSession(QObject):
         playlist's window back from now, less the time since the buffer's start (a kept
         buffer's gaps included: they have no width on the timeline), when that is
         `WINDOW_MIN_S` or more; else 0.0. 2.9.7: 0.0 on a borrowed session: a part would be a
-        stream of the channel beside the recording's, which no budget slot counts."""
+        stream of the channel beside the recording's, which no budget slot counts. 2.15: a
+        site's recording of the running broadcast (`set_site_recording`) reaches back to the
+        broadcast's start: from the buffer's start, by its dates, to the recording's."""
         if self._phase is not _Phase.PIPELINE or self._borrowed is not None:
             return 0.0
         snapshot = self._snapshot()
+        route = self._site_rec
+        if route is not None:
+            begins = self._date_at(snapshot, self._buffer_start(snapshot))
+            beyond = begins - route.start if begins is not None else 0.0
+            return beyond if beyond >= _RECORDING_MIN_S else 0.0
         window = _number(snapshot.get("window_s"))
         if snapshot.get("hls") is not True or window <= 0.0:
             return 0.0
@@ -1586,6 +1605,47 @@ class LiveSession(QObject):
     def in_server_part(self) -> bool:
         """VLC plays the server part, before the buffer (2.7)."""
         return self._in_part
+
+    def set_site_recording(self, route: Optional[RecordingRoute]) -> None:
+        """2.15: the channel's site keeps the running broadcast's recording (`route`; None:
+        it keeps none): a rewind past the buffer plays it (the bar reaches the broadcast's
+        start), placed by its pieces' dates on the buffer's, and playing forward goes on from
+        it into the buffer as one stream. It stands while this channel plays (a new tune
+        forgets it); a provider's archive or the channel's own server window give way."""
+        self._site_rec = route
+        if route is not None:
+            _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
+        if self._phase is _Phase.PIPELINE:
+            self._emit_timeline()
+
+    def _date_offset(self, snapshot: Mapping[str, Any]) -> Optional[float]:
+        """2.15: a dated buffer's date less timeline second at its start (its first dated
+        run's: a second before the buffer is placed by it); None for an undated one."""
+        dates = snapshot.get("dates")
+        for entry in dates if isinstance(dates, list) else ():
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                offset = entry[1]
+                if isinstance(offset, (int, float)) and not isinstance(offset, bool):
+                    return float(offset)
+        return None
+
+    def _date_at(self, snapshot: Mapping[str, Any], t: float) -> Optional[float]:
+        """2.15: live timeline second `t`'s date (Unix seconds): by the buffer's pieces'
+        PROGRAM-DATE-TIME, else by its parts' time of day."""
+        offset = self._date_offset(snapshot)
+        if offset is not None:
+            return t + offset
+        parts = live_parts.from_state(snapshot.get("parts"))
+        return live_parts.wall_at(parts, t, live_edge=self._live_edge(snapshot), now=self._wall())
+
+    def _t_of_date(self, snapshot: Mapping[str, Any], date: float) -> Optional[float]:
+        """2.15: where date `date` (Unix seconds) lies on the live timeline (`_date_at`'s
+        inverse; None where nothing was kept)."""
+        offset = self._date_offset(snapshot)
+        if offset is not None:
+            return date - offset
+        parts = live_parts.from_state(snapshot.get("parts"))
+        return live_parts.t_at(parts, date, live_edge=self._live_edge(snapshot), now=self._wall())
 
     def play_archive(
         self,
@@ -2816,6 +2876,8 @@ class LiveSession(QObject):
     def _on_ended(self, sid: str) -> None:
         if self._part is not None and sid == self._part.sid:
             self._part.ended = True  # 2.7: it reached the buffer (VLC's end hops)
+            if self._part.recording:
+                self._arm_join(self._part)  # 2.15: one stream on into the buffer
         elif sid == self._sid:
             self._ended = True
 
@@ -3107,7 +3169,10 @@ class LiveSession(QObject):
                 if not self._part_goes_on(part):
                     if part.failed:
                         self.notice.emit(PART_FAILED)  # it broke off with nothing to go on from
-                    self._hop()  # 2.7: the server part ran into the buffer
+                    if part.recording:  # 2.15: its stream did not go on: the buffer opens there
+                        self._hop(at=self._join_at if self._join_at is not None else None)
+                    else:
+                        self._hop()  # 2.7: the server part ran into the buffer
             else:
                 position = self._advance()
                 _LOG.info(
@@ -3163,7 +3228,14 @@ class LiveSession(QObject):
                 self._emit_timeline()
                 return
         part = self._part
-        if self._part_playing and part is not None and part.until is None:
+        if self._part_playing and part is not None and part.recording:
+            position = self._advance()
+            if self._join_at is not None and position >= self._join_at:
+                # 2.15: the recording's stream went on into the buffer: one stream, playing on
+                # (VLC opens nothing); should it have ended there, its end opens the buffer.
+                _LOG.info("The site's recording ran into the buffer; playing on there.")
+                self._leave_part()
+        elif self._part_playing and part is not None and part.until is None:
             position = self._advance()
             if position >= self._buffer_start():
                 self._hop(at=position)  # 2.7: a part without a stop played into the buffer
@@ -4555,6 +4627,9 @@ class LiveSession(QObject):
 
     def _open_part_now(self, t: float) -> None:
         assert self._sid is not None
+        if self._site_rec is not None:
+            self._open_recording_now(t, self._site_rec)
+            return
         if self._archive is not None and t < self._buffer_start() - self.server_window():
             self._open_archive_now(t, self._archive)
             return
@@ -4592,6 +4667,65 @@ class LiveSession(QObject):
         self._part_tries += 1
         _LOG.info("Opening the provider's archive %.0f s before the buffer.", -self._before(t))
 
+    def _open_recording_now(self, t: float, route: RecordingRoute) -> None:
+        """2.15: a part of the site's recording from live timeline second `t`: its listing from
+        the piece holding that moment, its input ending at the piece edge where the buffer
+        begins (by date), placed once its helper says where its first piece lies
+        (`_on_part_updated`)."""
+        snapshot = self._snapshot()
+        begin = self._date_at(snapshot, t)
+        stop = self._date_at(snapshot, self._buffer_start(snapshot))
+        if begin is None or stop is None:
+            self._part_failed()
+            return
+        window: dict[str, Any] = {
+            "from_s": max(0.0, begin - route.start),
+            "stop_s": max(0.0, stop - route.start),
+            "stop_date": stop,
+            "grows": True,
+            "ahead_s": WINDOW_AHEAD_S,
+        }
+        if route.steps:
+            window["reload_s"] = RECORDING_RELOAD_S
+        sid = self._engine.open_session(route.url, **self._open_args, window=window)
+        self._part = ServerPart(sid, t, None, recording=True)
+        self._join_at = None
+        self._part_tries += 1
+        _LOG.info("Opening the site's recording %.0f s before the buffer.", -self._before(t))
+
+    def _place_recording(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
+        """2.15: a recording part goes where its first piece's date lies on the buffer's
+        timeline: its PROGRAM-DATE-TIME, else the recording's start and the lengths before it."""
+        route = self._site_rec
+        if part.offset is not None or route is None or self._sid is None:
+            return
+        first = snapshot.get("part_date")
+        if not isinstance(first, (int, float)):
+            at = snapshot.get("part_start_s")
+            first = route.start + float(at) if isinstance(at, (int, float)) else None
+        if first is None:
+            return
+        part.offset = self._t_of_date(self._snapshot(), float(first))
+
+    def _arm_join(self, part: ServerPart) -> None:
+        """2.15: a recording part's input reached its stop: its viewer's stream goes on into
+        the buffer's segment that begins where it ends (the stream server's join), and the
+        session plays on in the buffer from there (`_tick`). Without one that near, VLC opens
+        the buffer there as it reaches it."""
+        if part.offset is None or part.failed or self._sid is None:
+            return
+        end = part.offset + _number(self._engine.snapshot(part.sid).get("end"))
+        self._join_at = end
+        spans = self._engine.spans(self._sid)
+        nearest = min(spans, key=lambda span: abs(span.start - end), default=None)
+        if nearest is None or abs(nearest.start - end) > _JOIN_SLACK_S:
+            _LOG.info("The site's recording ends where the buffer has no segment beginning.")
+            return
+        self._engine.join(part.sid, self._sid, nearest.seq)
+        _LOG.info(
+            "The site's recording joins the buffer (%.2f s from its end).", nearest.start - end
+        )
+
     def _before(self, t: float) -> float:
         """Live timeline second `t` from the buffer's start (negative before it), for logs."""
         return t - self._buffer_start()
@@ -4627,7 +4761,9 @@ class LiveSession(QObject):
         if snapshot.get("until_dropped") is True:
             part.until = None  # another encoding persisted: its numbers are not the buffer's
         wall = snapshot.get("part_wall")
-        if part.offset is None and isinstance(wall, (int, float)) and self._sid is not None:
+        if part.recording:
+            self._place_recording(part, snapshot)  # 2.15: by its dates, never its arrival
+        elif part.offset is None and isinstance(wall, (int, float)) and self._sid is not None:
             live = self._snapshot()
             parts = live_parts.from_state(live.get("parts"))
             media = snapshot.get("part_media_s")
@@ -4736,6 +4872,7 @@ class LiveSession(QObject):
         upstream parked for it opens again (`one_stream`); unless `replacing` (another part
         opens), a provider archive's route goes with it."""
         part, self._part = self._part, None
+        self._join_at = None
         if not replacing:
             self._archive = None
         self._part_ready = self._in_part = self._part_playing = False
