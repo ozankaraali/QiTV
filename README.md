@@ -1,8 +1,8 @@
-# QiTV - IPTV and STB Client
+# QiTV - IPTV, Radio and Media Player Client
 
 ## Please always download this free software from [qitv.app](https://qitv.app), its website, or [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware.
 
-QiTV is a free TV player for IPTV. It plays M3U playlists (lists of channel links), Xtream accounts (a server address with a username and password) and STB portals (a set-top-box portal address and a MAC address), on Windows, macOS and Linux.
+QiTV is a free player for IPTV, internet radio and media, on Windows, macOS and Linux. It plays M3U playlists (lists of channel links), Xtream accounts (a server address with a username and password) and STB portals (a set-top-box portal address and a MAC address), free radio stations, Kick and Twitch channels, Jellyfin, Emby and Plex servers, and the videos and music on your computer.
 
 Version 2.0 works like a TV: the channel fills the window, ↑ and ↓ change channels, and everything else (the channel list, the guide, the player controls) slides in over the picture and gets out of the way again. You can pause and rewind live TV, watch two channels at once, and browse movies and series in a Library with posters. Since 2.1, several providers mix in one channel list, one Library and one history, and what plays keeps playing in a corner while you browse. Since 2.11 it also plays the videos and music on your computer (see [Your own videos and music](#your-own-videos-and-music)). It is written in Python with Qt and plays everything with VLC.
 
