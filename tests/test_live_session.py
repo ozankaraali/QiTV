@@ -10056,6 +10056,69 @@ class TimedStartTests(LiveSessionCase):
             feed.run(15.0)
         self.assertEqual(feed.starved_s, 0.0)
 
+    def test_vlcs_picture_time_is_read_from_its_freshest_step(self):
+        # VLC's clock reads in steps, each behind it by up to a step (libVLC 3.0.23 through the
+        # pipeline: 25 ms from its start, then a step each quarter second, in step with the
+        # session's own quarter-second look, so the reading it sees stays as stale on every
+        # look; hel, Kick: 0.48 s read for a 0.29 s open). VLC's time to its picture is measured
+        # within 0.05 s of it all the same: from the earliest its readings give (steps each
+        # 0.3 s, out of step with the look), or from when libVLC stepped its clock
+        # (`clock_step`, steps in step with the look). So the timed starts it places land where
+        # they aim, never short of it: what this tune's landings missed their picks by
+        # (`_land_offset`, learned from each Go live) is not short, and the session reads each
+        # at its target or above. (The feed's VLC plays its first step of media as its open
+        # ends: its clock starts `open_s` less a step after play().)
+        for every, says in ((0.3, False), (0.25, True)):
+
+            def stepped(every=every):  # VLC's reading of what it played: 25 ms, then steps
+                played = self.playback.ms
+                step_ms = round(every * 1000)
+                return 0 if played <= 0 else max(25, played // step_ms * step_ms)
+
+            def step(stepped=stepped):  # when libVLC stepped to its reading, and to what
+                value = stepped()
+                if value <= 0:
+                    return None
+                return self.clock.now - (self.playback.ms - value) / 1000, value
+
+            for latency, target in ((AUTO, 1.0), ("low", 0.5)):
+                with self.subTest(every=every, latency=latency):
+                    self.live = self.make()
+                    self.playback.time_ms = stepped
+                    if says:
+                        self.playback.clock_step = step
+                    feed = self.tune_at(latency, 1.0, 0.3)
+                    self.landing(feed, 0)
+                    feed.run(20.0)
+                    for phase in (0.0, 0.5, 1.0, 1.5, 0.25, 0.75, 1.25, 1.75):
+                        self.run_to(feed, 2.0, phase)
+                        plays = len(self.playback.plays)
+                        self.live.go_live()
+                        self.landing(feed, plays)
+                        lag = self.timelines[-1]["lag"]
+                        self.assertGreaterEqual(lag, target - 0.05, f"phase {phase}")
+                        feed.run(12.0)
+                    self.assertGreaterEqual(self.live._land_offset, -0.05)  # (not short)
+                    self.assertAlmostEqual(self.live._picture_s(), 0.3 - Feed.DT, delta=0.05)
+                    self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_pause_while_go_live_waits_holds_the_picture_where_it_was(self):
+        # Go live waiting for its moment, then a pause: the paused picture stays where the
+        # viewer saw it, nothing opens under the pause (review M4: the wait went on and opened
+        # the live stream paused).
+        self.live = self.make()
+        feed = self.tune_at(AUTO, 1.0, 0.3)
+        self.landing(feed, 0)
+        feed.run(20.0)
+        self.run_to(feed, 2.0, 1.5)  # the newest keyframe 1.5 s back: the start waits
+        plays = len(self.playback.plays)
+        self.live.go_live()
+        self.assertEqual(len(self.playback.plays), plays)
+        self.live.toggle_pause()
+        feed.run(3.0)
+        self.assertEqual(len(self.playback.plays), plays)
+        self.assertIsNone(self.live._retry)
+
     def test_the_aim_is_where_stay_lives_own_landing_ends(self):
         self.assertEqual(live_session._AIM_ABOVE_S, stay_live._CLOSE_LAND_S)
 
