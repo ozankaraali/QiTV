@@ -77,6 +77,7 @@ from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay, announce
 from ui.overlays.painting import Units, fill_round, ui_units
 from ui.pointer import SecondClickGuard
+from ui.remote_typing import PhoneField
 from ui.text_edit import (
     CARET_W,
     SELECTION_ALPHA,
@@ -294,6 +295,32 @@ class _Card(Overlay):
     def focus(self) -> tuple[str, str]:
         """("field" | "paste" | "button" | "alt", its key): what the keys are on."""
         return self._focus
+
+    # ---- a phone's typing (2.15, ui/remote_typing.py) ---------------------------------------
+
+    def phone_field(self) -> Optional[PhoneField]:
+        """The field the keys are on (or on its Paste), while the card shows: named by its
+        label, else its placeholder, else the card's title; a secret one without its text."""
+        zone, key = self._focus
+        f, edit = self._field(key), self._edits.get(key)
+        if self.isHidden() or zone not in ("field", "paste") or f is None or edit is None:
+            return None
+        label = f.label or f.placeholder or self._title
+        return PhoneField(self, key, label, "" if f.secret else edit.text, f.secret)
+
+    def phone_type(self, key: str, text: str) -> bool:
+        """The phone's text in place of field `key`'s, as typed (`changed` when it changed);
+        False while the card is hidden or busy (the text being checked stays)."""
+        f, edit = self._field(key), self._edits.get(key)
+        if self.isHidden() or self._busy or f is None or edit is None:
+            return False
+        if self._focus != ("field", key):
+            self._set_focus(("field", key))  # (its Paste had the keys: Enter is the field's)
+        if edit.text != text:
+            edit.set_text(text)
+            self.update()
+            self._text_changed(key, text)
+        return True
 
     def busy(self) -> bool:
         return self._busy

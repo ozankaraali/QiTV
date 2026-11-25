@@ -149,6 +149,7 @@ from ui.overlays.painting import (
     ui_units,
 )
 from ui.pointer import NAV_BUTTONS, SecondClickGuard
+from ui.remote_typing import PhoneField
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import PALETTE, qcolor
 
@@ -1092,6 +1093,28 @@ class Drawer(Overlay):
     def clear_find(self) -> None:
         """✕ in the Find box: the find ends, the lists are back where they were."""
         self._end_find()
+
+    def phone_field(self) -> PhoneField | None:
+        """2.15: the Find box, for a phone's typing sheet (ui/remote_typing.py): typing finds
+        whichever column has the keys, so while the list shows it is offered quiet (the sheet
+        waits for a tap: the phone's buttons move the list), and once it shows a caret
+        (clicked, or typed into) it has the keys."""
+        if not self.isVisible():
+            return None
+        caret = self._find_open or bool(self.find_text)
+        label = translate(FIND_PLACEHOLDER)
+        return PhoneField(self, "find", label, self.find_text, quiet=not caret)
+
+    def phone_type(self, key: str, text: str) -> bool:
+        """2.15: the phone's text in place of the Find box's, as typing finds; the box keeps
+        its caret while the phone deletes it all (its sheet stays)."""
+        if key != "find" or not self.isVisible():
+            return False
+        self._find_open = True
+        if text != self.find_text:
+            self._set_find(text)
+        self.update()
+        return True
 
     def finding(self) -> bool:
         """Whether the right column lists what the find found."""

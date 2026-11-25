@@ -384,6 +384,18 @@ body.sheet-open .remote, body.sheet-open .rows, body.sheet-open .chips { overflo
 .acts button.pressed { background: var(--accent-fill); }
 .acts button.on { color: var(--text); box-shadow: inset 0 0 0 1.5px var(--accent); }
 .acts button.on svg { color: var(--accent); }
+/* 2.15: Stop on a row of its own under More's keys, so their grid stays whole. */
+.acts .stop { grid-column: 1 / -1; height: 52px; flex-direction: row; gap: 10px; font-size: 15px; }
+/* 2.15: the top line's keyboard: a text box on the TV takes typing (the sheet closed). It sits
+   before the line's other buttons at its right end. */
+.top .typer { margin-inline-start: auto; color: var(--accent); }
+.top .typer:not([hidden]) ~ .where, .top .typer:not([hidden]) ~ .lister { margin-inline-start: 0; }
+.typer.pressed { background: var(--raised-2); }
+/* 2.15: typing into the TV's text box: the box's name over the field, Done beside it; the sheet
+   rises over the phone's keyboard (screens.js follows the visual viewport). */
+.typing { transition: transform 0.18s ease-out, bottom 0.12s ease-out; }
+.typing-form { display: flex; flex-direction: column; gap: 10px; margin: 0; }
+.typing .field { height: 46px; font-size: 17px; }
 .menu-list { display: flex; flex-direction: column; }
 .menu-list button { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 4px; border-bottom: 1px solid var(--line); font-size: 16px; text-align: left; }
 .menu-list button .muted { font-size: 13px; }

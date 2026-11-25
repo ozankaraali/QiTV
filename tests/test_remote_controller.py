@@ -524,7 +524,7 @@ class PhoneQuestionTests(WindowCase):
         self.connect()
         asked_on = []
 
-        def play_elsewhere(launch, chosen=None, *, ask_on=None, recordings=False):
+        def play_elsewhere(launch, chosen=None, *, ask_on=None, recordings=False, **_kwargs):
             asked_on.append(ask_on)
             self.assertTrue(recordings)  # 2.8: the TV's recording goes to the phone too
             return True

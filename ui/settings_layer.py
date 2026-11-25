@@ -94,6 +94,10 @@ class SettingsLayer(QObject):
     def shown(self) -> bool:
         return self._settings is not None and self._settings.visible()
 
+    def phone_field(self) -> Any:
+        """2.15: the text box Settings' keys type into, if any (a phone's typing sheet)."""
+        return self._settings.phone_field() if self.shown() and self._settings else None
+
     def handle(self, action: Action, payload: object = "") -> bool:
         """A key while Settings shows: True when it is Settings' or one of the channel list's
         keys (those reach nothing under it); False for one that goes on (the sound's)."""

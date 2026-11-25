@@ -1530,6 +1530,133 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertEqual(self.external.calls, [])
         self.assertEqual(len(self.asked), 1)
 
+    def kept_item(self):
+        self.player.keep_new(KICK_PAGE, LIVE)
+        return {
+            "id": stream_id(KICK_PAGE),
+            "name": "examplechannel · Kick",
+            "cmd": KICK_PAGE,
+            "_provider": NETWORK_PROVIDER,
+        }
+
+    def test_a_phones_watch_of_an_offline_page_is_heard_by_the_phone_not_the_tv(self):
+        # 2.15: play_elsewhere's `failed` hears why (the phone waits): the TV says nothing,
+        # and its row says why, once.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        heard, launched = [], []
+        self.answers = [SiteError("offline"), SiteError("offline")]
+
+        def hear(asked, why):
+            heard.append((asked.item["cmd"], why))
+            return len(heard) == 1  # it begins to wait, then waits on
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        self.assertTrue(self.controller.play_elsewhere(launch, target, failed=hear))
+        self.assertTrue(wait_until(lambda: heard))
+        self.assertEqual(heard, [(KICK_PAGE, OFFLINE)])
+        self.assertEqual(self.store.get(stream_id(KICK_PAGE)).failed, OFFLINE)  # its row
+        self.controller.play_elsewhere(launch, target, failed=hear, again=lambda: True)
+        self.assertTrue(wait_until(lambda: len(heard) == 2))
+        pause(100)
+        self.assertEqual(self.errors(), [])
+        self.assertEqual(launched, [])
+
+    def test_a_phone_that_waits_for_the_channel_the_tv_waits_for_asks_alone(self):
+        # 2.15: Watch on this phone while the large picture waits for its channel: the phone
+        # waits for it now, and the TV's wait ends (its site is asked by one, not two).
+        self.calm()
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: OFFLINE in (self.pill_text() or "")))
+        self.answers = [SiteError("offline")]
+        heard = []
+        self.controller.play_elsewhere(
+            lambda _t, _url: (True, ""), None, failed=lambda t, why: heard.append(why) or True
+        )
+        self.assertTrue(wait_until(lambda: heard))
+        self.assertEqual(len(self.asked), 2)
+        pause(900)  # three of the TV's calm asks, were it still waiting
+        self.assertEqual(len(self.asked), 2)
+        self.assertIsNone(self.pill_text())
+        self.assertEqual(self.errors(), [])
+
+    def test_two_phones_asking_for_one_target_each_hear_their_own_answer(self):
+        # Review 4: each phone's ask is its own: two asks for the same Target (two phones'
+        # Watch of what the TV plays) are both asked, and each hook hears its own answer once.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        heard = {"a": [], "b": []}
+        self.answers = [SiteError("offline"), SiteError("offline")]
+        for name in ("a", "b"):
+            self.controller.play_elsewhere(
+                lambda _t, _url: (True, ""),
+                target,
+                failed=lambda _t, why, name=name: heard[name].append(why) or True,
+                again=lambda: True,
+            )
+        self.assertTrue(wait_until(lambda: heard["a"] and heard["b"]))
+        pause(100)
+        self.assertEqual(heard, {"a": [OFFLINE], "b": [OFFLINE]})
+        self.assertEqual(len(self.asked), 2)
+
+    def test_a_phones_watch_that_hears_failures_is_handed_its_link(self):
+        # 2.15: a Watch with `failed` (its own copy of the target) plays as any Watch does:
+        # the TV lets go, the phone gets the link, the hook hears nothing.
+        heard, launched = [], []
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        for asked, answer, link in ((target, MASTER, MASTER), (None, None, URL)):
+            with self.subTest(asked=asked is not None):
+                self.link(URL)  # the TV plays a link of its own
+                self.plays_now()
+                stops = len(self.live.named("stop"))
+                if answer is not None:
+                    self.answers = [answer]
+                launched.clear()
+                self.controller.play_elsewhere(
+                    launch, asked, failed=lambda _t, why: heard.append(why) or True
+                )
+                self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+                self.live.released.emit()
+                self.assertTrue(wait_until(lambda: launched == [link]))
+        self.assertEqual(heard, [])
+
+    def test_a_waiting_phones_ask_drops_no_choice_of_the_tvs(self):
+        # 2.15: its asks go beside the TV's choices (the TV's zap meanwhile still opens), and
+        # once live its stream is handed on only while the phone still waits for it.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        launched = []
+
+        def launch(_target, url):
+            launched.append(url)
+            return True, ""
+
+        self.link(URL)
+        self.plays_now()
+        generation, stops = self.controller._lanes._generation, len(self.live.named("stop"))
+        self.answers = [MASTER]
+        wanted = [False]
+        self.controller.play_elsewhere(launch, target, again=lambda: wanted[0])
+        self.assertTrue(wait_until(lambda: len(self.asked) == 1))
+        pause(100)
+        self.assertEqual(self.controller._lanes._generation, generation)  # nothing superseded
+        self.assertEqual(launched, [])  # no longer wanted: its address goes unused
+        self.assertEqual(self.controller.now_playing().item["cmd"], URL)  # the TV plays on
+        self.assertEqual(len(self.live.named("stop")), stops)
+        self.answers = [MASTER_FRESH]
+        wanted[0] = True
+        self.controller.play_elsewhere(launch, target, again=lambda: wanted[0])
+        # the TV lets go for it
+        self.assertTrue(wait_until(lambda: len(self.live.named("stop")) > stops))
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: launched == [MASTER_FRESH]))
+
     def test_a_channel_that_plays_through_its_buffer_rewinds_into_its_sites_recording(self):
         # 2.15: once the channel plays through its buffer, its site is asked (on a worker)
         # for the running broadcast's recording, once a tune; the live session takes it.

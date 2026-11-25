@@ -904,6 +904,10 @@ class FoldersDesk(QObject):
         """A key while Clear's question shows: True when it is the card's."""
         return self._asking and bool(self._card.handle(action))
 
+    def asking(self) -> bool:
+        """2.15: Clear's question shows (it has the keys: no box takes a phone's typing)."""
+        return self._asking
+
     def ask_clear(self) -> None:
         if not len(self._shelf):
             return

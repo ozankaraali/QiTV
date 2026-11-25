@@ -70,6 +70,26 @@ others' distributions, which may have malware.**
   If playing forward reaches a stretch the recording doesn't hold yet, the picture waits there
   a moment, as when it buffers, and goes on as soon as the recording grows.
 
+## On the phone
+
+- **Type into QiTV's text boxes from the phone.** When a text box on the TV has the keys (Open
+  Link's field, a provider's address and login, a setting edited in place, the Library's search
+  and genre filter, the OpenSubtitles search), the phone remote shows a field with the box's
+  name and its text. What you type or paste goes into the box as you type, the keyboard's Go is
+  Enter on the TV, and **Done** closes it. A password box stays masked on the phone, and its
+  text never goes to the phone. Where typing on the TV would start a find (the channel list,
+  Settings, the Library), a keyboard button at the top of the phone opens the field, so it never
+  covers the remote's buttons; it also opens a box again after **Done**.
+- **Open a link from the phone.** **More → Open a link** opens QiTV's Open Link card with the
+  phone's keyboard up: paste a Kick or Twitch channel, a video, a clip or any stream's link,
+  press Go, and it plays on the TV.
+- **Watch on this phone waits for a channel that isn't live.** A Kick or Twitch channel that is
+  off says "This channel isn't live now · It plays as soon as it's live". QiTV asks the site
+  again about every half a minute (never while the phone is away) and hands the phone the
+  stream once the channel is live; the phone holds no stream meanwhile. Two phones waiting for
+  the same channel share its asks, and it plays on the one that asked last. Choosing another
+  channel, switching back to the TV, leaving, or the TV playing something else ends the wait.
+
 ## Also in 2.15.0
 
 - **Ctrl/⌘+N opens File → Open Link…**, the card that plays a stream's link or a channel's
