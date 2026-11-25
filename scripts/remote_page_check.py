@@ -2568,7 +2568,7 @@ def scenario_typing(rig: Rig) -> None:
     assert rig.page.locator("#typeSheet").is_hidden(), "the sheet covered the numpad"
     assert rig.page.locator("#moreSheet").is_visible()
     # Over the phone's Library: the TV's Library search has the keys.
-    rig.page.click("#veil")
+    rig.page.click("#moreSheet [data-close=moreSheet]")  # the numpad's Done
     mark = rig.events.mark()
     rig.page.click("[data-tab=library]")
     answer(rig, sid, rig.events.wait(Get, where=lambda e: e.what == "genres", after=mark), GENRES)
