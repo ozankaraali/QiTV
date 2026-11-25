@@ -1280,11 +1280,13 @@ class LiveControls(QObject):
     def chosen(self, target: Target) -> None:
         """`target` is asked for now (TVController._request): a wait for another one, or its
         re-ask after a wait, is over (the wait's own ask goes on)."""
-        if target is not self._wait_ask:
+        if self._waiting is not None and target is not self._wait_ask:
             self._cancel_wait()
+            self._hide_retry()  # (its words are no other choice's)
         due = self._site_due
         if due is not None and target is not due[0]:
             self._cancel_site_again()
+            self._hide_retry()
 
     def _ask_live_now(self) -> None:
         """Try now on the pill of a channel that is not live: its site is asked at once, unless
@@ -1308,9 +1310,11 @@ class LiveControls(QObject):
         self._request(self._wait_ask)
 
     def stop_waiting(self) -> None:
-        """QiTV closes: a site's channel waited for is asked for no more."""
+        """A site's channel waited for is asked for no more (QiTV closes, or its site said
+        something else than "not live": that is said instead)."""
         self._cancel_wait()
         self._cancel_site_again()
+        self._hide_retry()
 
     def _cancel_wait(self) -> None:
         self._waiting = self._wait_ask = None

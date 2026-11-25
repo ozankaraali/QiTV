@@ -1231,6 +1231,17 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertEqual(len(self.asked), 1)  # never asked again
         self.assertEqual(self.starts()[-1][0], URL)
 
+    def test_a_wait_whose_site_then_refuses_says_so_and_ends(self):
+        self.calm()
+        self.answers = [SiteError("offline"), SiteError("refused")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.assertTrue(wait_until(lambda: self.errors()))
+        self.assertTrue(self.errors()[-1].startswith("Kick refused"))
+        self.assertIsNone(self.pill_text())  # no longer waits
+        pause(800)
+        self.assertEqual(len(self.asked), 2)
+
     def test_the_wait_ends_with_qitv(self):
         self.calm()
         self.answers = [SiteError("offline")]

@@ -2778,8 +2778,16 @@ class TVController(QObject):
             return False
         waiting = self._live_controls.waits_for(target)
         if not is_offline(message) and not (waiting and message in (TIMED_OUT, FAILED)):
+            if waiting:
+                self._live_controls.stop_waiting()  # (its site said another thing: said)
             return False
         self._forget_room(target)
+        if not waiting:
+            # It takes the large picture as a delivered link does (what records there records on
+            # in the background; a file or the audio screen gives way); nothing plays meanwhile.
+            self._before_new_target(target, delivered=True)
+            self._set_recording_aside()
+            self._live_controls.new_target()
         self._live_controls.wait_for_live(target, message if is_offline(message) else "")
         self._current, self._cid = target, None
         self._restore_channel()
