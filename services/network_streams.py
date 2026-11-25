@@ -89,8 +89,7 @@ SITE_UNKNOWN = N_("No channel named {channel} on {site}")
 SITE_REFUSED = N_("{site} refused QiTV's request: try again later, or paste the stream link")
 # i18n: a video or clip opened by its page (Kick, Twitch) is not there: removed, or never was
 SITE_GONE = N_("This video is gone from {site}")
-# i18n: a video or clip opened by its page (Kick, Twitch) may be watched by its channel's
-# subscribers only, or its channel keeps it private
+# i18n: a video or clip opened by its page (Kick, Twitch) is private, or for subscribers only
 SITE_PRIVATE = N_("This video is private or for subscribers only on {site}")
 _SITE_TEXTS = {"offline": SITE_OFFLINE, "unknown": SITE_UNKNOWN, "refused": SITE_REFUSED}
 _MEDIA_TEXTS = {"unknown": SITE_GONE, "private": SITE_PRIVATE, "refused": SITE_REFUSED}

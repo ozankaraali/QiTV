@@ -963,6 +963,8 @@ class LiveSession(QObject):
         # plays, and where a recording part's stream goes on into the buffer (timeline s)
         self._site_rec: Optional[RecordingRoute] = None
         self._join_at: Optional[float] = None
+        self._site_reach: Optional[float] = None  # the Unix second its listing reaches, as known
+        self._joined: Optional[tuple[str, int]] = None  # the join asked: (its part, the segment)
         self._said_scheme: Optional[str] = None  # 2.7.1: the session whose scheme the log said
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
@@ -1613,10 +1615,17 @@ class LiveSession(QObject):
         it into the buffer as one stream. It stands while this channel plays (a new tune
         forgets it); a provider's archive or the channel's own server window give way."""
         self._site_rec = route
+        self._site_reach = route.until if route is not None else None
         if route is not None:
             _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
         if self._phase is _Phase.PIPELINE:
             self._emit_timeline()
+
+    def _recording_reach(self, snapshot: Mapping[str, Any]) -> Optional[float]:
+        """2.15: where the site's recording reaches on the timeline, as last known; None."""
+        if self._site_rec is None or self._site_reach is None:
+            return None
+        return self._t_of_date(snapshot, self._site_reach)
 
     def _date_offset(self, snapshot: Mapping[str, Any]) -> Optional[float]:
         """2.15: a dated buffer's date less timeline second at its start (its first dated
@@ -4552,6 +4561,11 @@ class LiveSession(QObject):
             else:
                 reach = start if position >= start else position - WINDOW_BAR_S
                 window_start = min(reach, position)
+            reach_t = self._recording_reach(snapshot)
+            if reach_t is not None and reach_t < start - _RECORDING_MIN_S:
+                # 2.15: where the site's recording reaches yet: past it, before the buffer, is
+                # not there yet (the bar shows a hole there, filled as the recording grows)
+                state["window_end"] = max(window_start, reach_t)
             if archive:  # a provider archive's: half an hour past it, beyond any window too
                 reach = min(start, position) - WINDOW_BAR_S
                 window_start = min(window_start, reach)
@@ -4689,7 +4703,7 @@ class LiveSession(QObject):
             window["reload_s"] = RECORDING_RELOAD_S
         sid = self._engine.open_session(route.url, **self._open_args, window=window)
         self._part = ServerPart(sid, t, None, recording=True)
-        self._join_at = None
+        self._join_at = self._joined = None
         self._part_tries += 1
         _LOG.info("Opening the site's recording %.0f s before the buffer.", -self._before(t))
 
@@ -4719,8 +4733,12 @@ class LiveSession(QObject):
         spans = self._engine.spans(self._sid)
         nearest = min(spans, key=lambda span: abs(span.start - end), default=None)
         if nearest is None or abs(nearest.start - end) > _JOIN_SLACK_S:
-            _LOG.info("The site's recording ends where the buffer has no segment beginning.")
+            if self._joined is None or self._joined[0] != part.sid:
+                _LOG.info("The site's recording ends where the buffer has no segment beginning.")
             return
+        if self._joined == (part.sid, nearest.seq):
+            return  # asked already
+        self._joined = (part.sid, nearest.seq)
         self._engine.join(part.sid, self._sid, nearest.seq)
         _LOG.info(
             "The site's recording joins the buffer (%.2f s from its end).", nearest.start - end
@@ -4763,6 +4781,11 @@ class LiveSession(QObject):
         wall = snapshot.get("part_wall")
         if part.recording:
             self._place_recording(part, snapshot)  # 2.15: by its dates, never its arrival
+            listed = snapshot.get("listed_s")
+            if self._site_rec is not None and isinstance(listed, (int, float)):
+                self._site_reach = self._site_rec.start + float(listed)  # (it grows)
+            if part.ended:
+                self._arm_join(part)  # (its last state after its end: where it ends now)
         elif part.offset is None and isinstance(wall, (int, float)) and self._sid is not None:
             live = self._snapshot()
             parts = live_parts.from_state(live.get("parts"))
@@ -4872,7 +4895,7 @@ class LiveSession(QObject):
         upstream parked for it opens again (`one_stream`); unless `replacing` (another part
         opens), a provider archive's route goes with it."""
         part, self._part = self._part, None
-        self._join_at = None
+        self._join_at = self._joined = None
         if not replacing:
             self._archive = None
         self._part_ready = self._in_part = self._part_playing = False

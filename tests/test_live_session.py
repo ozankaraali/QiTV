@@ -8778,6 +8778,23 @@ class SiteRecordingTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
         self.assertFalse(self.live.in_server_part())
 
+    def test_where_the_recording_does_not_reach_yet_is_a_hole_that_fills_as_it_grows(self):
+        # Right after a tune its listing may end short of the buffer's start: the bar shows
+        # that stretch as not there yet; a part's reload that lists more fills it.
+        self.playing()
+        self.live.set_site_recording(
+            RecordingRoute(self.URL, 6_400.0, dated=True, steps=True, until=9_985.0)
+        )
+        self.live._emit_timeline()
+        self.assertEqual(self.timelines[-1]["window_end"], -15.0)
+        own = [Span(0, 0.0, 10.0, False, media_seq=0)]
+        part = self.in_recording(-1_800.0, own, part_date=8_195.0)
+        snapshot = dict(self.engine.snapshot(part), listed_s=3_600.0)  # it reaches the buffer
+        self.engine._snapshots[part] = snapshot
+        self.engine.sessionUpdated.emit(part, snapshot)
+        self.live._emit_timeline()
+        self.assertNotIn("window_end", self.timelines[-1])
+
     def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
         sid = self.playing()
         own = [Span(0, 0.0, 10.0, False, media_seq=0)]

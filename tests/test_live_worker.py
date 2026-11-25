@@ -2550,7 +2550,7 @@ class AdoptTests(unittest.TestCase):
         helper = SimpleNamespace(
             root=str(self.root),
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *a: None),
+            server=SimpleNamespace(add_session=lambda *a, **k: None),
             disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring, parked=False: None),
             trim_disk=lambda session: None,
             forget_ring=lambda ring: None,
@@ -2648,7 +2648,7 @@ class TeardownTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
             forget_ring=lambda ring: None,
         )
         session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
@@ -2793,7 +2793,7 @@ class RamFallbackSizeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root=str(root),
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda sid, ring, ended: adopted.append(ring)),
+            server=SimpleNamespace(add_session=lambda sid, ring, ended, **_k: adopted.append(ring)),
             # 2.6: the disk rings' shared amount
             disk_budget=lambda max_bytes: SimpleNamespace(register=lambda ring: None),
             forget_ring=lambda ring: None,
@@ -2849,7 +2849,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "e", "http://provider.test/e.ts", {}, True, RAM, 6.0)
         session._segmenter = Segmenter(clock=lambda: clock.now)
@@ -2897,7 +2897,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
 
@@ -2936,7 +2936,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
         told = []
@@ -2986,7 +2986,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "t", "http://provider.test/t.ts", {}, True, RAM, 6.0)
         told, heard = [], []
@@ -3040,7 +3040,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: None,
-            server=SimpleNamespace(add_session=lambda *args: None),
+            server=SimpleNamespace(add_session=lambda *args, **kwargs: None),
         )
         session = worker._Session(helper, "r", "http://provider.test/r.ts", {}, True, RAM, 6.0)
         held = []
@@ -3092,7 +3092,7 @@ class HeardEdgeTests(unittest.TestCase):
         helper = SimpleNamespace(
             root="",
             send=lambda message, session=None: sent.append(message),
-            server=SimpleNamespace(add_session=lambda *a: None),
+            server=SimpleNamespace(add_session=lambda *a, **k: None),
         )
         session = worker._Session(helper, "h", "http://provider.test/h.ts", {}, True, RAM, 6.0)
         seen = {"takers": set()}

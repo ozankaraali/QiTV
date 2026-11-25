@@ -464,6 +464,8 @@ class _Timeline:
     adjusted: bool  # the channel's Auto target moved from where Auto starts
     archive: bool = False  # the provider's archive plays (catch-up)
     buffer_start: Optional[float] = None  # the bar reaches into an archive: the buffer's start
+    # 2.15: where a site's recording reaches yet, before the buffer (past it: not there yet)
+    window_end: Optional[float] = None
     parts: tuple[Part, ...] = ()  # 2.6: a kept buffer's runs, each with its time of day
     behind: Optional[float] = None  # 2.6: seconds behind now in the day, the time away included
 
@@ -488,6 +490,7 @@ class _Timeline:
             adjusted=bool(state.get("adjusted", False)),
             archive=bool(state.get("archive", False)),
             buffer_start=_optional(state.get("buffer_start")),
+            window_end=_optional(state.get("window_end")),
             parts=tuple(parts_from_state(state.get("parts"))),
             behind=_optional(state.get("behind")),
         )
@@ -2449,6 +2452,15 @@ class Transport(Overlay):
             p.fillRect(QRectF(x, part.top(), gap, part.height()), qcolor(PALETTE.canvas, 0.9))
             x += step
         p.restore()
+        tl = self._timeline
+        if tl is not None and tl.window_end is not None and not tl.archive:
+            # 2.15: past where a site's recording reaches yet, the line breaks: not there yet
+            left = seek.x() + seek.width() * self._bar().frac(tl.window_end)
+            if part.right() > left:
+                p.fillRect(
+                    QRectF(left, part.top(), part.right() - left, part.height()),
+                    qcolor(PALETTE.canvas),
+                )
 
     def _paint_gaps(self, p: QPainter, un: Units, seek: QRectF) -> None:
         """Where nothing was kept between two parts (2.6): the line breaks, a short upright

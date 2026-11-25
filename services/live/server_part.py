@@ -89,12 +89,14 @@ class RecordingRoute:
     """A site's recording of the running broadcast (2.15, `LiveSession.set_site_recording`):
     `url`, its media playlist (no token; never logged); `start`, the Unix second its first
     piece starts at; `dated`, its pieces carry PROGRAM-DATE-TIME; `steps`, it grows in steps
-    and says it ends meanwhile (Kick: read again every `RECORDING_RELOAD_S`)."""
+    and says it ends meanwhile (Kick: read again every `RECORDING_RELOAD_S`); `until`, the Unix
+    second its listing reached as its site was asked (None: not known)."""
 
     url: str
     start: float
     dated: bool
     steps: bool
+    until: Optional[float] = None
 
 
 RECORDING_RELOAD_S = 30.0  # (the owner's brief: Kick's recording grows every 30-60 s)

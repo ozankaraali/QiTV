@@ -125,12 +125,14 @@ class Recording:
     playlist (no token; never logged); `start`, the Unix second its first piece starts at;
     `dated`, its pieces carry PROGRAM-DATE-TIME (Kick), else they are placed from `start` by
     their lengths (Twitch); `steps`, its playlist says it ends while it still grows, in steps
-    (Kick: re-read about every 30 s, the end ignored)."""
+    (Kick: re-read about every 30 s, the end ignored); `until`, the Unix second its listing
+    reached as it was asked (None: not known)."""
 
     url: str
     start: float
     dated: bool
     steps: bool
+    until: float | None = None
 
 
 class SiteError(Exception):
@@ -770,7 +772,9 @@ def _twitch_recording(
     gql: str,
     vod: str,
 ) -> Recording | None:
-    query = "query($l:String!){user(login:$l){stream{archiveVideo{id status createdAt}}}}"
+    query = (
+        "query($l:String!){user(login:$l){stream{archiveVideo{id status createdAt lengthSeconds}}}}"
+    )
     answer = _gql(http, stop, gql, {"query": query, "variables": {"l": channel}})
     user = answer.get("user")
     stream = user.get("stream") if isinstance(user, dict) else None
@@ -781,7 +785,9 @@ def _twitch_recording(
     if not isinstance(ident, str) or not _TWITCH_VIDEO.fullmatch(ident) or start is None:
         return None
     master, text = _vod_master(ident, http, stop, gql, vod)
-    return Recording(_source_variant(master, text), start, dated=False, steps=False)
+    length = video.get("lengthSeconds")
+    until = start + float(length) if isinstance(length, (int, float)) else None
+    return Recording(_source_variant(master, text), start, dated=False, steps=False, until=until)
 
 
 def _kick_recording(
@@ -804,11 +810,14 @@ def _kick_recording(
         return None
     first = playlist.segments[0] if playlist.segments else None
     dated = first.program_date_time if first is not None else None
+    listed = sum(float(segment.duration or 0) for segment in playlist.segments)
     if dated is not None:
         start = (dated if dated.tzinfo else dated.replace(tzinfo=timezone.utc)).timestamp()
-        return Recording(variant, start, dated=True, steps=True)
+        return Recording(variant, start, dated=True, steps=True, until=start + listed)
     start = _when(row.get("start_time"))
-    return None if start is None else Recording(variant, start, dated=False, steps=True)
+    if start is None:
+        return None
+    return Recording(variant, start, dated=False, steps=True, until=start + listed)
 
 
 def _kick_json_list(url: str, http: requests_types.Session, stop: threading.Event | None) -> list:

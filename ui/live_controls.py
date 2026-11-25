@@ -1210,11 +1210,13 @@ class LiveControls(QObject):
             start = getattr(found, "start", None)
             if not isinstance(url, str) or not isinstance(start, float):
                 return
+            until = getattr(found, "until", None)
             route = RecordingRoute(
                 url,
                 start,
                 bool(getattr(found, "dated", False)),
                 bool(getattr(found, "steps", False)),
+                until if isinstance(until, float) else None,
             )
             setter(route)
 
