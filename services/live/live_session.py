@@ -3265,12 +3265,18 @@ class LiveSession(QObject):
         part = self._part
         if self._part_playing and part is not None and part.recording:
             position = self._advance()
+            joined = self._joined
+            if part.ended and (joined is None or joined[0] != part.sid):
+                self._arm_join(part)  # (the buffer may hold its segment by now)
+                joined = self._joined
             if self._join_at is not None and position >= self._join_at:
+                if joined is None or joined[1] < 0:
+                    self._hop(at=position)  # 2.15: no join was made: the buffer opens there
+                    return
                 # 2.15: the recording's stream went on into the buffer: one stream, playing on
                 # (VLC opens nothing); should it have ended there, its end opens the buffer.
                 _LOG.info("The site's recording ran into the buffer; playing on there.")
-                if self._joined is not None:
-                    self._base += self._join_shift  # (the picture is at that segment's start)
+                self._base += self._join_shift  # (the picture is at that segment's start)
                 self._leave_part()
         elif self._part_playing and part is not None and part.until is None:
             position = self._advance()
@@ -4752,8 +4758,10 @@ class LiveSession(QObject):
     def _arm_join(self, part: ServerPart) -> None:
         """2.15: a recording part's input reached its stop: its viewer's stream goes on into
         the buffer's segment that begins where it ends (the stream server's join), and the
-        session plays on in the buffer from there (`_tick`). Without one that near, VLC opens
-        the buffer there as it reaches it."""
+        session plays on in the buffer from there (`_tick`). Where the buffer holds nothing
+        yet (live, Twitch: its last piece ended 9 s past the buffer's start, 2 s after the
+        tune), it is asked again as the buffer grows (`_tick`); without a segment beginning that
+        near, the buffer opens there as the picture reaches it."""
         if part.offset is None or part.failed or self._sid is None:
             return
         end = part.offset + _number(self._engine.snapshot(part.sid).get("end"))
@@ -4761,7 +4769,8 @@ class LiveSession(QObject):
         spans = self._engine.spans(self._sid)
         nearest = min(spans, key=lambda span: abs(span.start - end), default=None)
         if nearest is None or abs(nearest.start - end) > _JOIN_SLACK_S:
-            if self._joined is None or self._joined[0] != part.sid:
+            if spans and spans[-1].end > end + _JOIN_SLACK_S and self._joined is None:
+                self._joined = (part.sid, -1)  # none there: never asked again
                 _LOG.info("The site's recording ends where the buffer has no segment beginning.")
             return
         if self._joined == (part.sid, nearest.seq):

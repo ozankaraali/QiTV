@@ -8861,6 +8861,18 @@ class SiteRecordingTests(LiveSessionCase):
         self.live.seek_to(-5.0)
         self.assertEqual(self.engine.opened[-1][2]["window"]["from_s"], 3_595.0)
 
+    def test_a_join_is_asked_again_as_the_buffer_grows_to_where_the_recording_ends(self):
+        # Live, Twitch 2026-11-25: its last piece ended 9 s past the buffer's start 2 s after
+        # the tune, where the buffer held nothing yet: no join was asked, and VLC stood 6 s.
+        sid = self.playing(spans=self.SPANS[:4])  # 8 s buffered
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 30.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 10.0: the buffer reaches 8.0
+        self.assertEqual(self.engine.joins, [])
+        self.engine.buffer(sid, self.SPANS[:10], hls=True, dates=[[0.0, 10_000.0]])
+        self.live._tick()
+        self.assertEqual(self.engine.joins, [(part, sid, 5)])  # its segment at 10.0, once there
+
     def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
         sid = self.playing()
         own = [Span(0, 0.0, 10.0, False, media_seq=0)]
