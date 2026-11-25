@@ -638,6 +638,26 @@ class SiteWaitTests(PhoneCase):
         self.assertTrue(self.sent("play", "s8")[-1]["url"].startswith("https://edge.example"))
         self.assertEqual(remote._waits.waits(), [])
 
+    def test_a_declined_recording_question_ends_that_phones_wait(self):
+        """Ruling (batch 4): live, the hand-off asked the phone that asked last whether to
+        stop a recording; "Keep recording" ends its wait (it hears so, as today) and it is
+        never asked again; another phone waiting gets the channel's next ask."""
+        self.connect()
+        self.connect("s9", "d9")
+        remote = self.window.remote
+        self.answers = [OFFLINE, OFFLINE]
+        self.watch("s8")
+        self.watch("s9")
+        self.assertTrue(wait_until(lambda: len(self.asks) == 3, timeout_ms=3000))  # unanswered
+        self.assertEqual(self.asks[-1][1]["ask_on"], "s9")
+        remote._on_phone_asked("s9", "Stop recording?", "Stop", "Keep recording")
+        remote._on_answered("s9", remote._asks["s9"], False)
+        self.assertEqual(self.sent("play", "s9")[-1]["why"], "recording")
+        self.assertFalse(remote._waits.waiting("d9"))
+        self.assertTrue(remote._waits.waiting("d8"))
+        self.assertTrue(wait_until(lambda: len(self.asks) == 4, timeout_ms=3000))
+        self.assertEqual(self.asks[-1][1]["ask_on"], "s8")  # the next one still there
+
     def test_waiting_holds_no_stream_of_what_the_phone_played(self):
         self.connect()
         remote, controller = self.window.remote, self.window.controller

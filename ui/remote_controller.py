@@ -1163,6 +1163,18 @@ class RemoteController(QObject):
         self._window.controller.answer_phone(yes)
         if not yes:  # Keep recording: nothing opens on the phone
             self._send(sid, {"t": "play", "failed": True, "why": "recording"})
+            self._decline_wait(self._device(sid))
+
+    def _decline_wait(self, device: str) -> None:
+        """2.15: phone `device` kept a recording rather than take its channel as it came
+        live: it waits no more (never asked again); another phone waiting gets the channel's
+        next ask, after the calm wait."""
+        wait = self._waits.wait_of(device)
+        if wait is None:
+            return
+        self._waits.end(device)
+        if self._waits.current(wait):
+            self._waits.ask_later(wait)
 
     def _film_to(self, sid: str, item: dict, url: str, message: dict) -> None:
         """An MKV film (Safari plays none) goes to the phone as HLS from QiTV's home door

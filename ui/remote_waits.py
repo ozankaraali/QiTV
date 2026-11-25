@@ -121,6 +121,13 @@ class SiteWaits(QObject):
         self._drop(wait)
         return None
 
+    def ask_later(self, wait: SiteWait) -> None:
+        """The channel's ask came to nothing (its stream was not taken): asked again after the
+        calm wait, not the lost answer's."""
+        if self.current(wait):
+            wait.asking = False
+            self._arm(wait, _next_ask())
+
     def take(self, wait: SiteWait) -> Optional[list[str]]:
         """The site gave the channel a stream: its phones (the last to ask last), and the wait
         is over; None when it ended meanwhile (the stream is not handed on)."""
