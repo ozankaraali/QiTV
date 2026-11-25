@@ -867,6 +867,7 @@ class StayLive:
         if self.mode is Mode.LIVE:
             return
         self._user_rate = rate
+        self._eased = rate  # 2.15: what the catch-up eased to so far (it never speeds up again)
         self.mode = Mode.CATCHING_UP if rate > 1 else Mode.SHIFTED
 
     def update(self, lag_s: float, buffering: bool, *, now: float) -> Decision:
@@ -895,6 +896,9 @@ class StayLive:
                 rate = _EASE_RATE  # (eased before the edge: it never runs dry there)
             if rate > _FAST and near <= _EASE_LAST_S:
                 rate = _FAST
+            # (once eased it stays eased: a stall that puts it back a little never speeds it
+            # up again, live 2026-11-25)
+            self._eased = rate = min(rate, getattr(self, "_eased", rate))
             return Decision(rate)
         if buffering:
             # What the wait adds is a step, not a drift; but a VLC that runs dry again and

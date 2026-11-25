@@ -127,6 +127,7 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(sl.update(S + 3.99, False, now=clock.tick()), Decision(1.25))
         self.assertEqual(sl.update(S + 0.99, False, now=clock.tick()), Decision(1.10))
         self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
+        self.assertEqual(sl.update(S + 1.2, False, now=clock.tick()), Decision(1.10))  # stays
         self.assertIs(sl.mode, Mode.CATCHING_UP)
         self.assertEqual(sl.update(S, False, now=clock.tick()), Decision(1.0))
         self.assertIs(sl.mode, Mode.LIVE)
