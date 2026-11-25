@@ -9,11 +9,12 @@ anything else sees them.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import json
 import re
 from typing import Literal, Optional
+import unicodedata
 
 from services.captions.languages import QWEN_LANGUAGES
 from services.captions.mt_languages import MT_LANGUAGES
@@ -40,6 +41,12 @@ MAX_RATE = 60  # phone messages in any one second
 MAX_QUERY = 100
 MAX_HANDLE = 32
 MAX_STEPS = 100_000
+MAX_TYPED = 4096  # 2.15: a text box's text, as the phone types it in (a long link fits)
+MAX_LABEL = 120  # 2.15: a text box's label, as QiTV names it on the phone's typing sheet
+# 2.15: what this QiTV answers that an older one does not, as its hello says ("can"): the
+# phone's Open link ("link") and its typing into QiTV's text boxes ("type"). A page shows a
+# control only for what the hello names.
+CAN = ("link", "type")
 
 _B64 = re.compile(r"[A-Za-z0-9_-]*")
 
@@ -172,9 +179,11 @@ def parse_phone_message(obj: object) -> Optional[dict]:
         return None
     t = obj.get("t")
     # 2.8: the Library's Refresh; closesearch: the search shown on the TV closes (the phone's
-    # Done; an older QiTV ignores it)
-    if t in ("held", "where", "forget", "totv", "refresh", "closesearch"):
+    # Done; an older QiTV ignores it); 2.15: link: the TV's Open Link card opens
+    if t in ("held", "where", "forget", "totv", "refresh", "closesearch", "link"):
         return {"t": t}
+    if t == "type":  # 2.15: the phone's text for the TV's text box QiTV numbered (its "field")
+        return _typed(obj)
     if t == "pos":  # how far the phone got in a film or an episode it plays
         ms, length = _int(obj.get("ms")), _int(obj.get("len"))
         if ms is not None and length is not None and 0 <= ms <= MAX_POS and 0 < length <= MAX_POS:
@@ -264,6 +273,19 @@ def _of(obj: dict) -> Optional[int]:
     """2.9: the number of the "tracks" list a pick was made in (what played large then)."""
     of = _int(obj.get("of"))
     return of if of is not None and 0 <= of <= MAX_ASK else None
+
+
+def _typed(obj: dict) -> Optional[dict]:
+    """2.15: what the phone typed into the TV's text box `id` (the number QiTV's "field" gave
+    it), cut at MAX_TYPED and without control characters (a pasted line's break); with "go",
+    the phone's Go/Return: Enter on the TV once it is in."""
+    number, text, go = _int(obj.get("id")), obj.get("s"), obj.get("go", False)
+    if number is None or not 0 <= number <= MAX_ASK or not isinstance(text, str):
+        return None
+    if not isinstance(go, bool):
+        return None
+    text = "".join(c for c in text[:MAX_TYPED] if unicodedata.category(c) != "Cc")
+    return {"t": "type", "id": number, "s": text, "go": go}
 
 
 def _track(obj: dict) -> Optional[dict]:
@@ -495,6 +517,25 @@ class CloseSearch:
     """The phone's search is done: the search it showed on the TV (Show on TV) closes."""
 
     sid: str
+
+
+@dataclass(frozen=True)
+class OpenLinkCard:
+    """2.15: the phone's Open link: the TV's Open Link card opens, as File → Open Link…"""
+
+    sid: str
+
+
+@dataclass(frozen=True)
+class Typed:
+    """2.15: the phone's text for the TV's text box `box` (the number QiTV's "field" gave it),
+    in place of the box's own; `enter`: Enter follows (the phone's Go). The text is never in a
+    repr nor logged: it may be a password."""
+
+    sid: str
+    box: int
+    text: str = field(repr=False)
+    enter: bool = False
 
 
 @dataclass(frozen=True)

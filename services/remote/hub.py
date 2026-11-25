@@ -40,6 +40,7 @@ from services.remote.page_strings import page_hello
 from services.remote.pairing import RemoteStore
 from services.remote.pictures import PictureServer, PictureShelf
 from services.remote.protocol import (
+    CAN,
     CODE_ROTATE_S,
     HANDSHAKE_S,
     MAX_FRAME,
@@ -428,14 +429,15 @@ class HubCore:
         )
 
     def hello(self) -> dict:
-        """What the hello adds: the page's words, and which page this QiTV carries."""
+        """What the hello adds: the page's words, which page this QiTV carries, and (2.15) what
+        it answers that an older one does not (`CAN`)."""
         if self._page_id is None:
             try:
                 self._page_id = page_id(self.web_dir)
             except OSError as error:
                 logger.warning("Phone remote: couldn't read the page: %s", safe_exc(error))
                 self._page_id = ""
-        return {**self._page_hello(), "page": self._page_id}
+        return {**self._page_hello(), "page": self._page_id, "can": list(CAN)}
 
     def capacity_left(self) -> bool:
         established = sum(1 for c in self.conns.values() if c.session.established)

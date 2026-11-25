@@ -1207,6 +1207,7 @@
   "This channel can't open right now. Playing what was kept.": "Este canal não pode abrir agora. Reproduzindo o que foi guardado.",
   "This channel is already playing": "Este canal já está em reprodução",
   "This channel is recording on schedule already.": "Este canal já está sendo gravado conforme o agendamento.",
+  "This channel isn't live now": "Este canal não está ao vivo agora",
   "This channel's archive isn't available right now": "O arquivo deste canal não está disponível agora",
   "This copy of QiTV has a key of its own: yours is optional, and is used instead when set.": "Esta cópia do QiTV tem uma chave própria: a sua é opcional e, se definida, é usada no lugar dela.",
   "This film doesn't play on a phone. Tap TV to watch it there.": "Este filme não é reproduzido no celular. Toque em TV para assistir lá.",

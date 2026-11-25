@@ -89,6 +89,9 @@ const words = {
   translate_to: "Translate to",
   no_audio: "No audio tracks",
   no_subtitles: "No subtitles",
+  open_link: "Open a link",
+  not_live: "This channel isn't live now",
+  plays_when_live: "It plays as soon as it's live",
 };
 const w = (key) => (t(key) === key ? words[key] || key : t(key));
 
@@ -1759,6 +1762,7 @@ const FILM_WHY = {
   rec_relay: "rec_relay",
   rec_open: "rec_open",
   elsewhere: "asked_elsewhere", // its question gave way to a newer one: not "Opening…" for ever
+  offline: "not_live", // 2.15: a site's channel that isn't live now: it plays here once it is
 };
 
 function onPlay(message) {
@@ -1767,7 +1771,7 @@ function onPlay(message) {
     const why = FILM_WHY[message.why];
     if (here && why) {
       stopVideo();
-      caption("", w(why), true);
+      caption("", message.why === "offline" ? `${w(why)} · ${w("plays_when_live")}` : w(why), true);
     } else if (here && !hereLink) caption("", w("pick_here"));
     return;
   }
@@ -1831,6 +1835,159 @@ function bindHere() {
   });
 }
 
+// ---- 2.15: typing into the TV's text boxes, and Open link ---------------------------------
+// QiTV says which of its text boxes the keys type into ("field": its number, its name, its text;
+// a secret one only that it is: masked here, its text never sent) or that none does ({t:
+// "field"}). The sheet shows while one does: what is typed (or pasted) replaces the box's text
+// as it is typed, a moment after the last key (never a burst); Go is Enter on the TV (with the
+// text first, when it changed); Done closes it for that box (the next one shows it again). Open
+// link (a QiTV whose hello says "link") opens the TV's Open Link card: the sheet comes at once,
+// in the tap, so the phone's keyboard is up, and types into the card's field once QiTV names it.
+const TYPE_DEBOUNCE_MS = 250;
+let box = null; // {id, secret}: QiTV's box the sheet types into (null: none yet)
+let typeTimer = null; // the text still to go
+let touched = false; // typed into (a secret box's text is never replaced untouched)
+let dismissed = null; // the box Done closed: its sheet stays closed
+let awaitingLink = false; // Open link tapped: the card's field is on its way
+let typingTv = null; // the TV the boxes are of (another's numbers are other boxes)
+
+function typingShown() {
+  return !$("typeSheet").hidden;
+}
+
+// The sheet goes (and the veil, when no other sheet shows).
+function hideTyping() {
+  if (!typingShown()) return;
+  $("typeSheet").hidden = true;
+  if (![...document.querySelectorAll(".sheet")].some((sheet) => !sheet.hidden)) {
+    $("veil").hidden = true;
+    document.body.classList.remove("sheet-open");
+  }
+}
+
+function sendTyped(go = false) {
+  clearTimeout(typeTimer);
+  typeTimer = null;
+  if (!box) return;
+  const message = { t: "type", id: box.id, s: $("typeInput").value };
+  send(go ? { ...message, go: true } : message);
+}
+
+function flushTyped() {
+  if (typeTimer !== null) sendTyped();
+}
+
+function showTyping(label, secret, text) {
+  const input = $("typeInput");
+  $("typeLabel").textContent = label;
+  input.type = secret ? "password" : "text";
+  input.autocomplete = secret ? "new-password" : "off";
+  input.value = text;
+  touched = false;
+  if (!typingShown()) openSheet("typeSheet");
+  keepAboveKeyboard();
+  try {
+    input.focus({ preventScroll: true }); // the keyboard, where the phone allows it unasked
+  } catch {
+    // (an older browser's focus takes no options)
+  }
+}
+
+function onField(message) {
+  const id = Number.isInteger(message.id) ? message.id : null;
+  if (id === null) {
+    box = null; // no box has the keys: closed, nothing more goes
+    clearTimeout(typeTimer);
+    typeTimer = null;
+    if (!awaitingLink) hideTyping();
+    return;
+  }
+  if (box && box.id === id) return; // the same box (said again to a phone that came back)
+  if (id === dismissed) return;
+  flushTyped(); // the box before: its last letters (dropped there, if it is not it any more)
+  const secret = message.secret === true;
+  const label = typeof message.label === "string" ? message.label : "";
+  const text = !secret && typeof message.text === "string" ? message.text : "";
+  const typed = awaitingLink && touched ? $("typeInput").value : null; // before the card came
+  awaitingLink = false;
+  box = { id, secret };
+  if (typed !== null) {
+    $("typeLabel").textContent = label;
+    touched = true;
+    sendTyped();
+    return;
+  }
+  showTyping(label, secret, text);
+}
+
+function typingClosed() {
+  flushTyped();
+  if (box) dismissed = box.id;
+  box = null;
+  awaitingLink = false;
+  touched = false;
+  $("typeSheet").style.bottom = "";
+  $("typeInput").blur();
+}
+
+// iOS keeps a sheet fixed to the bottom under its keyboard: it rises over it.
+function keepAboveKeyboard() {
+  const view = window.visualViewport;
+  if (!view || !typingShown()) return;
+  const covered = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
+  $("typeSheet").style.bottom = covered ? `${covered}px` : "";
+}
+
+function openLink() {
+  closeSheets(); // the More sheet
+  box = null;
+  dismissed = null;
+  awaitingLink = true;
+  showTyping(w("open_link"), false, ""); // in the tap: the keyboard comes up
+  send({ t: "link" });
+}
+
+function onTypingHello(message) {
+  const can = Array.isArray(message && message.can) ? message.can : [];
+  $("openLink").hidden = !can.includes("link"); // an older QiTV can't answer it
+  if (typingTv !== app.tvId) dismissed = null; // another TV's numbers are other boxes
+  typingTv = app.tvId;
+  // A new session: QiTV says again which box has the keys, if one does.
+  box = null;
+  awaitingLink = false;
+  clearTimeout(typeTimer);
+  typeTimer = null;
+  hideTyping();
+}
+
+function bindTyping() {
+  const input = $("typeInput");
+  input.addEventListener("input", () => {
+    touched = true;
+    if (!box) return; // Open link's field still on its way: it goes once it is named
+    clearTimeout(typeTimer);
+    typeTimer = setTimeout(() => sendTyped(), TYPE_DEBOUNCE_MS);
+  });
+  $("typeForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!box) return;
+    if (touched) sendTyped(true); // the text, then Enter
+    else tap("ok"); // nothing typed (a password kept as it is): Enter alone
+  });
+  const done = $("typeDone");
+  pressable(done);
+  done.addEventListener("click", hideTyping);
+  new MutationObserver(() => {
+    if (!typingShown()) typingClosed();
+  }).observe($("typeSheet"), { attributes: true, attributeFilter: ["hidden"] });
+  const button = $("openLink");
+  pressable(button);
+  button.addEventListener("click", openLink);
+  if (window.visualViewport) {
+    for (const type of ["resize", "scroll"]) window.visualViewport.addEventListener(type, keepAboveKeyboard);
+  }
+}
+
 // ---- wiring -------------------------------------------------------------------------------
 
 // A reconnect (the phone slept, the network changed) is a new session: the rows shown carry the
@@ -1839,6 +1996,7 @@ let hellos = 0;
 
 function onHello(message) {
   hellos += 1;
+  onTypingHello(message); // 2.15
   pictures = !!message && message.door === "home"; // QiTV's pictures come its own way alone
   if (zapping()) zap.reopen(); // the Remote tab's list, on the first hello too
   if (hellos === 1) return; // the first: nothing else is open yet
@@ -1873,6 +2031,7 @@ app.handlers.ask = onAsk;
 app.handlers.unask = onUnask;
 app.handlers.cast = onCast;
 app.handlers.tracks = onTracks;
+app.handlers.field = onField; // 2.15
 app.handlers["tab:guide"] = openGuide;
 app.handlers["tab:library"] = openLibrary;
 app.menuExtras.push(() => {
@@ -1898,6 +2057,7 @@ export function install() {
   bindRec();
   bindCast();
   bindTracks();
+  bindTyping();
   setInterval(() => {
     if (current && !document.hidden) drawNow();
     if (recordings.length && !document.hidden) drawRec();

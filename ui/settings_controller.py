@@ -31,6 +31,7 @@ from services.settings_values import SettingsValues
 from ui.keymap import Action
 from ui.overlays.base import Overlay
 from ui.overlays.settings_drawer import SettingsDrawer
+from ui.remote_typing import PhoneField, field_of
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +287,15 @@ class SettingsController(QObject):
     def card_shown(self) -> bool:
         """Whether a card shows over Settings (it has the keys)."""
         return self._card() is not None
+
+    def phone_field(self) -> Optional[PhoneField]:
+        """2.15: the text box Settings' keys type into, for a phone's typing sheet: the field
+        of the card over it (none while it asks), else the text edited in place (none while the
+        rows have the keys: typing there finds a setting)."""
+        card = self._card()
+        if card is not None:
+            return field_of(card)
+        return self._drawer.phone_field() if self._drawer.editing() else None
 
     def _card(self) -> Optional[Card]:
         """The card on top, of those in sight (a card hides itself when it is done). One whose

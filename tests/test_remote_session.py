@@ -18,6 +18,7 @@ from services.remote.protocol import (
     Held,
     Opened,
     OpenItem,
+    OpenLinkCard,
     Paired,
     Position,
     Press,
@@ -29,6 +30,7 @@ from services.remote.protocol import (
     Timer,
     ToTv,
     TrackPick,
+    Typed,
     WatchHere,
 )
 from services.remote.session import MessageTooBig, Session
@@ -270,6 +272,26 @@ class KkTests(SessionCase):
                 CaptionsTranslate(sid, "Russian", 3),
             ],
         )
+
+    def test_typing_and_open_link_become_events(self):  # 2.15
+        phone, session, _, _ = self.pair()
+        sid = session.sid
+        got = []
+        for message in (
+            {"t": "link"},
+            {"t": "type", "id": 4, "s": "secret words"},
+            {"t": "type", "id": 4, "s": "https://kick.com/example", "go": True},
+        ):
+            got += session.receive(phone.seal(message)).events
+        self.assertEqual(
+            got,
+            [
+                OpenLinkCard(sid),
+                Typed(sid, 4, "secret words"),
+                Typed(sid, 4, "https://kick.com/example", True),
+            ],
+        )
+        self.assertNotIn("secret", repr(got[1]))  # what is typed is never in a repr (a log)
 
     def test_a_message_without_a_route_never_forgets_the_phone(self):  # 2.8
         phone, session, _, _ = self.pair()

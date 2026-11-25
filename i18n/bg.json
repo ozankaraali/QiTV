@@ -1207,6 +1207,7 @@
   "This channel can't open right now. Playing what was kept.": "Каналът не може да се отвори в момента. Пуска се запазеното.",
   "This channel is already playing": "Този канал вече се пуска",
   "This channel is recording on schedule already.": "Този канал вече се записва по график.",
+  "This channel isn't live now": "Този канал не е на живо в момента",
   "This channel's archive isn't available right now": "Архивът на този канал не е наличен в момента",
   "This copy of QiTV has a key of its own: yours is optional, and is used instead when set.": "Това копие на QiTV има собствен ключ: вашият е по избор и се използва вместо него, ако е зададен.",
   "This film doesn't play on a phone. Tap TV to watch it there.": "Този филм не се пуска на телефон. Докоснете „ТВ“, за да го гледате там.",

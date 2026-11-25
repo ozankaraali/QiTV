@@ -187,6 +187,7 @@ from ui.song_jobs import AlbumJob, CoverJob, cover_colours
 # i18n: a toast: the multiview cannot open while a picture is cast to a TV
 MULTIVIEW_WHILE_CASTING = N_("Stop casting to show the multiview")
 from ui.record_guard import RecordGuard
+from ui.remote_typing import field_of
 from ui.settings_controller import MOUSE_FORWARD, SettingsController
 from ui.settings_layer import SettingsLayer
 from ui.stream_question import ScheduledRecording, StreamQuestion, quit_text
@@ -472,6 +473,9 @@ class TVController(QObject):
         )
         # Cards over the TV of their own (File → Open Link…'s, plan 4; add_card).
         self._cards: list[Any] = []
+        # 2.15: the phones' Watches asked for (play_elsewhere's target), with what hears why
+        # one failed (a site's channel that isn't live waits for it on the phone).
+        self._elsewhere_failed: list[tuple[Target, Callable[[Target, str], Optional[bool]]]] = []
         # Provider setups: the loading and welcome hints, the last channel, the Library's
         # hold on live TV. What opens by itself (the list, the welcome card) waits while
         # Settings or a card over the TV shows: either has the keys (final review M1).
@@ -1814,6 +1818,22 @@ class TVController(QObject):
             return "drawer"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
 
+    def phone_field(self) -> Any:
+        """2.15: the text box a typed letter goes into now, in `handle`'s order, for a phone's
+        typing sheet (ui/remote_typing.py; its questions and menus are asked first there): a
+        card's over the TV, Settings', or the channel list's Find box; None for none."""
+        if self._closed:
+            return None
+        card = self._shown_card()
+        if card is not None:
+            return field_of(card)
+        if (self._online is not None and self._online.visible()) or self._guide.is_open():
+            return None
+        if self.settings_layer.shown():
+            return self.settings_layer.phone_field()
+        drawer = self.overlays.drawer
+        return drawer.phone_field() if drawer.isVisible() else None
+
     # ---- Settings in the drawer (ui/settings_layer.py) ----------------------------------------
 
     def set_settings(self, settings: SettingsController) -> None:
@@ -2871,6 +2891,14 @@ class TVController(QObject):
                     waits.append(self._grid.link_failed(name, target.item, message))
         if self._pip is not None:
             waits.append(self._pip.offline(target, message))
+        for at, (asked, hear) in enumerate(self._elsewhere_failed):
+            if asked is target:  # 2.15: a phone's Watch (play_elsewhere's `failed`)
+                del self._elsewhere_failed[at]
+                try:
+                    waits.append(hear(target, message))
+                except Exception as error:  # a phone's ask must never take QiTV down
+                    logger.error("A phone's failed link: %s", type(error).__name__)
+                break
         if False in waits:
             return  # it waits on: said and counted once already
         if True not in waits:
@@ -6288,13 +6316,20 @@ class TVController(QObject):
         *,
         ask_on: Optional[str] = None,
         recordings: bool = False,
+        failed: Optional[Callable[[Target, str], Optional[bool]]] = None,
+        again: Optional[Callable[[], bool]] = None,
     ) -> bool:
         """What plays now, or `target`, handed to `launch` with its link (a phone's player) as
         Play in VLC hands it: the in-app stream is released first, so the provider counts one.
         False when nothing from a provider is current (a file opened from the disk stays here).
         2.6: with no stream free while a recording holds one, phone `ask_on` is asked.
         2.8: with `recordings`, a recording of the Library goes too, its file's URI as its
-        link (a phone gets it from QiTV's home door)."""
+        link (a phone gets it from QiTV's home door).
+        2.15: `failed` hears why its link failed (a phone's Watch of a site's channel that is
+        not live waits for it: ui/remote_waits.py): True, it begins to wait (nothing is said
+        here; its row counts it once), False, it waits on (nothing said nor counted), None, as
+        ever. `again`: a waiting phone's ask, asked beside the TV's choices (none is dropped
+        for it) and handed on only if `again()` still says so when its link comes."""
         target = target or self._current
         if self._closed or target is None:
             return False
@@ -6313,11 +6348,16 @@ class TVController(QObject):
             return True
 
         def play(url: str) -> None:
+            self._elsewhere_failed = [e for e in self._elsewhere_failed if e[0] is not chosen]
+            if again is not None and not again():
+                return  # 2.15: the phone waits for it no more (its site's address unused)
             self._play_external(
                 chosen, url, lambda link, **_http: launch(chosen, link), ask_on=ask_on, phone=True
             )
 
-        self._lanes.request_side(target, play, play=True)
+        if failed is not None:  # (the newest few: one that never answers is not kept for ever)
+            self._elsewhere_failed = [*self._elsewhere_failed[-7:], (chosen, failed)]
+        self._lanes.request_side(target, play, play=again is None)
         return True
 
     def _play_external(

@@ -1197,6 +1197,7 @@
   "This channel can't open right now. Playing what was kept.": "该频道暂时无法打开。正在播放已保留的内容。",
   "This channel is already playing": "该频道已在播放",
   "This channel is recording on schedule already.": "此频道已在按计划录制。",
+  "This channel isn't live now": "该频道目前没有直播",
   "This channel's archive isn't available right now": "该频道的回看暂时不可用",
   "This copy of QiTV has a key of its own: yours is optional, and is used instead when set.": "此版本的 QiTV 自带密钥：你自己的密钥是可选的，设置后将优先使用。",
   "This film doesn't play on a phone. Tap TV to watch it there.": "此电影无法在手机上播放。轻点“电视”在电视上观看。",

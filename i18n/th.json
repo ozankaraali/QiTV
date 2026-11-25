@@ -1197,6 +1197,7 @@
   "This channel can't open right now. Playing what was kept.": "ตอนนี้เปิดช่องนี้ไม่ได้ กำลังเล่นส่วนที่เก็บไว้",
   "This channel is already playing": "ช่องนี้กำลังเล่นอยู่แล้ว",
   "This channel is recording on schedule already.": "ช่องนี้กำลังบันทึกตามกำหนดการอยู่แล้ว",
+  "This channel isn't live now": "ช่องนี้ไม่ได้ถ่ายทอดสดอยู่ในขณะนี้",
   "This channel's archive isn't available right now": "รายการย้อนหลังของช่องนี้ยังใช้ไม่ได้ในขณะนี้",
   "This copy of QiTV has a key of its own: yours is optional, and is used instead when set.": "QiTV ชุดนี้มีคีย์ของตัวเอง: คีย์ของคุณไม่บังคับ และจะใช้แทนเมื่อกรอกไว้",
   "This film doesn't play on a phone. Tap TV to watch it there.": "ภาพยนตร์เรื่องนี้เล่นบนโทรศัพท์ไม่ได้ แตะทีวีเพื่อดูบนทีวี",

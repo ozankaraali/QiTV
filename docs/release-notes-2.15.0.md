@@ -64,6 +64,23 @@ others' distributions, which may have malware.**
   **Go live** (<kbd>L</kbd>) comes back to live as usual. A channel that keeps no past
   broadcasts rewinds as far as QiTV's buffer, as before.
 
+## On the phone
+
+- **Type into QiTV's text boxes from the phone.** When a text box on the TV has the keys (Open
+  Link's field, a provider's address and login, a setting edited in place, the channel list's
+  Find box once it shows a caret), the phone remote shows a field with the box's name and its
+  text. What you type or paste goes into the box as you type, the keyboard's Go is Enter on
+  the TV, and **Done** closes it. A password box stays masked on the phone, and its text never
+  goes to the phone.
+- **Open a link from the phone.** **More → Open a link** opens QiTV's Open Link card with the
+  phone's keyboard up: paste a Kick or Twitch channel, a video, a clip or any stream's link,
+  press Go, and it plays on the TV.
+- **Watch on this phone waits for a channel that isn't live.** A Kick or Twitch channel that is
+  off says "This channel isn't live now · It plays as soon as it's live". QiTV asks the site
+  again about every half a minute (never while the phone is away) and hands the phone the
+  stream once the channel is live; the phone holds no stream meanwhile. Choosing another
+  channel, switching back to the TV or leaving ends the wait.
+
 ## Also in 2.15.0
 
 - **Ctrl/⌘+N opens File → Open Link…**, the card that plays a stream's link or a channel's

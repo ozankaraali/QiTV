@@ -1217,6 +1217,7 @@
   "This channel can't open right now. Playing what was kept.": "Ovaj se kanal trenutačno ne može otvoriti. Reproducira se sačuvano.",
   "This channel is already playing": "Ovaj se kanal već reproducira",
   "This channel is recording on schedule already.": "Ovaj se kanal već snima prema rasporedu.",
+  "This channel isn't live now": "Ovaj kanal trenutačno nije uživo",
   "This channel's archive isn't available right now": "Arhiva ovog kanala trenutačno nije dostupna",
   "This copy of QiTV has a key of its own: yours is optional, and is used instead when set.": "Ova kopija QiTV-a ima vlastiti ključ: vaš nije obavezan, a ako ga postavite, koristi se umjesto njega.",
   "This film doesn't play on a phone. Tap TV to watch it there.": "Ovaj se film ne može reproducirati na telefonu. Dodirnite TV za gledanje na televizoru.",

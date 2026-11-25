@@ -141,6 +141,7 @@ from ui.overlays.settings_layout import (  # its metrics are offered from here t
     whole,
 )
 from ui.pointer import NAV_BUTTONS, WHEEL_NOTCH, SecondClickGuard
+from ui.remote_typing import PhoneField
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key as field_key, paint_edit
 from ui.theme import PALETTE, qcolor
 
@@ -423,6 +424,29 @@ class SettingsDrawer(Overlay):
     def editing(self) -> bool:
         """Whether a text row's text is being edited (the field has the keys: `edit_key`)."""
         return self._edit is not None
+
+    def phone_field(self) -> Optional[PhoneField]:
+        """2.15: the text being edited, for a phone's typing sheet (ui/remote_typing.py): named
+        by its row's title; a secret one without its text."""
+        edit = self._edit
+        if edit is None or not self.isVisible():
+            return None
+        row = next((r for r in self._right_rows() if r.key == self._edit_row), None)
+        if row is None:
+            return None
+        label = row.text if row.literal else translate(row.text)
+        secret = self._edit_secret
+        return PhoneField(self, row.key, label, "" if secret else edit.text, secret)
+
+    def phone_type(self, key: str, text: str) -> bool:
+        """2.15: the phone's text in place of the edited text of row `key` (kept as Enter keeps
+        it, or put back as Esc does, as a typed one is)."""
+        edit = self._edit
+        if edit is None or key != self._edit_row:
+            return False
+        edit.set_text(text)
+        self.update()
+        return True
 
     def refresh(self) -> None:
         """A value changed: lay the rows out and paint them again (their values are asked

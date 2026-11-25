@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
@@ -49,6 +49,7 @@ from services.remote.protocol import (
     Held,
     Opened,
     OpenItem,
+    OpenLinkCard,
     Paired,
     PictureWanted,
     Position,
@@ -62,6 +63,7 @@ from services.remote.protocol import (
     Timer,
     ToTv,
     TrackPick,
+    Typed,
     WatchHere,
 )
 from services.search import Hit
@@ -77,6 +79,8 @@ from ui.remote_library import PhoneLibrary
 from ui.remote_pictures import PhonePictures
 from ui.remote_repeat import KeyRepeater
 from ui.remote_snapshots import TITLE_CHARS, Handles, results, results_of, state, tracks
+from ui.remote_typing import PhoneField, focused_field
+from ui.remote_waits import SiteWait, SiteWaits
 
 if TYPE_CHECKING:
     from services.remote.hub import RemoteHub
@@ -224,6 +228,16 @@ class RemoteController(QObject):
         captions = getattr(window, "captions", None)
         if captions is not None:
             captions.changed.connect(self._on_captions_changed)
+        # 2.15: the text box the keys type into, as the phones were told last ("field"), and
+        # its number, which their typing carries back (a box that took the keys since is
+        # another number: what was typed for the last one never lands in it).
+        self._field: Optional[PhoneField] = None
+        self._field_number = 0
+        # 2.15: the phones whose Watch waits for a site's channel to be live, by device, and
+        # the number of each one's last ask (a Watch, a hand back): a late answer to one before
+        # it begins no wait.
+        self._waits = SiteWaits(self._ask_live_again, self)
+        self._watch_asks: dict[str, int] = {}
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -284,6 +298,8 @@ class RemoteController(QObject):
         self._track_phones.clear()
         self._last_tracks = None
         self._caption_asks.clear()  # the TV's card still asks
+        self._field = None
+        self._waits.end_all()
         if self.hub is not None:
             # Not waited for: a phone being sent a film held the window up to 4 s (Settings,
             # Quit). Quitting waits for it later (`wait_stopped`).
@@ -432,6 +448,7 @@ class RemoteController(QObject):
             self._diff.start()
             snapshot = self._state()
             self._send(event.sid, self._dressed(event.sid, snapshot, self._last_picture))
+            self._push_field(to=event.sid)  # 2.15: the box the keys type into, if one does
         elif isinstance(event, Get):
             self._answer(event)
         elif isinstance(event, Query):
@@ -447,6 +464,10 @@ class RemoteController(QObject):
         elif isinstance(event, CloseSearch):  # the phone's Done: the TV's search closes too
             if self._window.screens.library_shown():
                 self._window.screens.library_controller.close_search()
+        elif isinstance(event, Typed):  # 2.15: into the TV's text box
+            self._typed(event)
+        elif isinstance(event, OpenLinkCard):  # 2.15: the phone's Open link
+            self._open_link()
         elif isinstance(event, Position):
             self._position(event.sid, event.position_ms, event.length_ms, event.play)
         elif isinstance(event, Answered):
@@ -515,6 +536,7 @@ class RemoteController(QObject):
             return
         self._stop_phones()
         self._push_tracks()
+        self._push_field()
         last, last_at = self._last_state, self._last_at
         snapshot = state(self._window)
         picture = self._now_picture()
@@ -762,7 +784,9 @@ class RemoteController(QObject):
 
     def _watch_here(self, sid: str, handle: str = "") -> None:
         """What the TV plays, or the channel `handle` of the phone's lists, in the phone's own
-        player. QiTV lets go of its own stream first: one screen at a time."""
+        player. QiTV lets go of its own stream first: one screen at a time. 2.15: a site's
+        channel that isn't live now waits for it (`_watch_failed`)."""
+        number = self._new_watch_ask(self._device(sid))  # what it waited for, it asks no more
         controller = self._window.controller
         chosen: Optional[Target] = None
         group: Optional[tuple[str, list]] = None
@@ -789,6 +813,26 @@ class RemoteController(QObject):
             else:  # a series opens on the TV; anything else plays nowhere but there
                 self._send(sid, {"t": "play", "failed": True})
                 return
+
+        def failed(target: Target, why: str) -> Optional[bool]:
+            return self._watch_failed(sid, group, target, why, number)
+
+        try:
+            handed = controller.play_elsewhere(
+                self._launcher(sid, group), chosen, ask_on=sid, recordings=True, failed=failed
+            )
+        except Exception as error:  # a phone's ask must never take QiTV down
+            logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
+            handed = False
+        if not handed:
+            self._send(sid, {"t": "play", "failed": True})
+
+    def _launcher(
+        self, sid: str, group: Optional[tuple[str, list]]
+    ) -> Callable[[Target, str], tuple[bool, str]]:
+        """What hands phone `sid` the link of a target (TVController.play_elsewhere's
+        `launch`), once QiTV let go of its own stream."""
+        controller = self._window.controller
 
         def launch(target: Target, url: str) -> tuple[bool, str]:
             if sid not in self._phones:
@@ -830,13 +874,145 @@ class RemoteController(QObject):
             self._handed_to = self._device(sid)  # it plays: the others let go (handedOn)
             return True, ""
 
+        return launch
+
+    # ---- 2.15: a site's channel that isn't live waits for it (ui/remote_waits.py) ----------
+
+    def _new_watch_ask(self, device: str) -> int:
+        """Phone `device` asks for something else (a Watch, a hand back to the TV): what it
+        waited for, it waits for no more, and a late answer to an ask before is nobody's."""
+        self._waits.end(device)
+        number = (self._watch_asks.get(device, 0) + 1) % MAX_ASK
+        self._watch_asks[device] = number
+        return number
+
+    def _watch_failed(
+        self,
+        sid: str,
+        group: Optional[tuple[str, list]],
+        target: Target,
+        why: str,
+        number: int,
+        wait: Optional[SiteWait] = None,
+    ) -> Optional[bool]:
+        """Why phone `sid`'s Watch of `target` (its ask `number`; a wait's ask again: `wait`)
+        got no link (TVController.play_elsewhere's `failed`): a site's channel that isn't live
+        now waits for it, the phone says so ("why" "offline"; an older page: "Pick a channel
+        below…" until it plays) and holds no stream meanwhile; True as it begins to wait, False
+        as it waits on (the TV says nothing), None for any other failure (the TV says why; the
+        phone hears it failed). An answer to what the phone asks for no more is nobody's (False:
+        nothing said); one that comes once the phone left begins no wait."""
+        device = self._device(sid)
+        if self._watch_asks.get(device) != number:
+            return False
+        if wait is not None and self._waits.wait_of(device) is not wait:
+            return False
+        to = self._session_of(device)
+        if to is None:  # it left meanwhile (a wait goes on until it is away too long)
+            return False if self._waits.waiting(device) else None
+        begun = self._waits.failed(device, target, group, why)
+        if begun is None:
+            self._send(to, {"t": "play", "failed": True})
+        elif begun:
+            self._let_go(device)
+            name = target.title[:TITLE_CHARS]
+            self._send(to, {"t": "play", "failed": True, "why": "offline", "name": name})
+        return begun
+
+    def _ask_live_again(self, device: str, wait: SiteWait) -> bool:
+        """Phone `device`'s wait asks the site again (beside the TV's choices: none of them
+        is dropped for it); False while the phone is away (asked again once it is back)."""
+        sid = self._session_of(device)
+        if sid is None or self.hub is None:
+            return False
+        number = self._watch_asks.get(device, 0)
+
+        def failed(target: Target, why: str) -> Optional[bool]:
+            return self._watch_failed(sid, wait.group, target, why, number, wait)
+
+        logger.info("Asking the site of %s whether it is live now (a phone's)", wait.target.title)
+        return bool(
+            self._window.controller.play_elsewhere(
+                self._launcher(sid, wait.group),
+                wait.target,
+                ask_on=sid,
+                failed=failed,
+                # once it is live: handed on while the phone is still there and waits for it
+                again=lambda: sid in self._phones and self._waits.take(device, wait),
+            )
+        )
+
+    def _let_go(self, device: str) -> None:
+        """What phone `device` played goes: QiTV reads no film for it, and the stream it held
+        is given back (no phone watches any more)."""
+        if self._watching.pop(device, None) is None:
+            return
+        if self.hub is not None:
+            self.hub.forget_film(device)
+        if not self._watching:
+            self._window.controller.phone_stopped()
+
+    def _session_of(self, device: str) -> Optional[str]:
+        """A session open for phone `device` (a phone that slept is another one since)."""
+        return next((sid for sid in sorted(self._phones) if self._device(sid) == device), None)
+
+    # ---- 2.15: typing into the TV's text boxes, and Open link ------------------------------
+
+    def _push_field(self, to: str = "") -> None:
+        """The phones hear which text box the keys type into ("field", numbered) when another
+        one does, or that none does any more ({"t": "field"}); phone `to`, just come, hears
+        the one there is now. A secret box's text is never sent (ui/remote_typing.py)."""
+        if self.hub is None:
+            return
         try:
-            handed = controller.play_elsewhere(launch, chosen, ask_on=sid, recordings=True)
-        except Exception as error:  # a phone's ask must never take QiTV down
-            logger.error("Phone remote: playing on the phone failed: %s", safe_message(error))
-            handed = False
-        if not handed:
-            self._send(sid, {"t": "play", "failed": True})
+            now = focused_field(self._window)
+        except Exception as error:  # what the phones see must never take QiTV down
+            logger.error("Phone remote: the text box with the keys: %s", type(error).__name__)
+            now = None
+        shown = self._field
+        if now is not None and now.same_box(shown):
+            if to:
+                self._send(to, now.message(self._field_number))
+            return
+        if now is None and shown is None:
+            return
+        self._field = now
+        if now is None:
+            self.hub.broadcast({"t": "field"})
+            return
+        self._field_number = (self._field_number + 1) % MAX_ASK
+        self.hub.broadcast(now.message(self._field_number))
+
+    def _typed(self, event: Typed) -> None:
+        """What a phone typed into the box it was told of (by its number), in place of the
+        box's text; its Go is Enter, as its OK. Typed for a box that no longer has the keys, it
+        goes nowhere (the phones hear of the one that has them). Never logged."""
+        shown = self._field
+        if shown is None or event.box != self._field_number:
+            return
+        try:
+            now = focused_field(self._window)
+            if now is None or not now.same_box(shown):
+                self._push_field()
+                return
+            now.holder.phone_type(now.key, event.text)
+        except Exception as error:  # (its words may be what was typed: the type alone)
+            logger.error("Phone remote: typing into a text box failed: %s", type(error).__name__)
+            return
+        if event.enter:
+            self._press("ok")  # Enter, where the keys are
+        elif self._phones:
+            self._soon.start(AFTER_PRESS_MS)
+
+    def _open_link(self) -> None:
+        """The phone's Open link: the TV's Open Link card, as File → Open Link… opens it; its
+        field has the keys, so the phones' typing sheet comes."""
+        try:
+            self._window.open_link()
+        except Exception as error:  # a phone's press must never take QiTV down
+            logger.error("Phone remote: Open link failed: %s", type(error).__name__)
+        if self._phones:
+            self._soon.start(AFTER_PRESS_MS)
 
     def _on_phone_asked(self, sid: str, text: str, yes: str, no: str) -> None:
         """QiTV asks phone `sid` (2.6: stop a recording for its Watch?)."""
@@ -947,7 +1123,9 @@ class RemoteController(QObject):
             self._window.controller.phone_position(link, position_ms)
 
     def _to_tv(self, sid: str) -> None:
-        """The phone hands back what it played: the TV plays it."""
+        """The phone hands back what it played: the TV plays it (2.15: what it waited for, it
+        waits for no more)."""
+        self._new_watch_ask(self._device(sid))
         watched = self._watching.pop(self._device(sid), None)
         if watched is None:
             return
@@ -993,10 +1171,13 @@ class RemoteController(QObject):
                 self.hub.forget_film(device)  # nor reads a film for it any more
 
     def _watch_gone(self, sid: str) -> None:
-        """Session `sid` closed: if its device watched and has no other session open, its
-        stream goes back after PHONE_GONE_S unless it comes back (`Opened`)."""
+        """Session `sid` closed: if its device watched (2.15: or waited for a channel to be
+        live) and has no other session open, its stream goes back (its wait ends) after
+        PHONE_GONE_S unless it comes back (`Opened`)."""
         device = self._device(sid)
-        if device not in self._watching or device in self._gone_timers:
+        if device in self._gone_timers:
+            return
+        if device not in self._watching and not self._waits.waiting(device):
             return
         if any(other != sid and self._device(other) == device for other in self._phones):
             return
@@ -1010,6 +1191,7 @@ class RemoteController(QObject):
         timer = self._gone_timers.pop(device, None)
         if timer is not None:
             timer.deleteLater()
+        self._waits.end(device)  # 2.15: away too long: it waits no more
         if self._watching.pop(device, None) is None:
             return
         if self.hub is not None:
@@ -1368,6 +1550,7 @@ class RemoteController(QObject):
                 if name:
                     self._window.screens.notify(translate(REMOVED_TEXT, name=name))
         self._names = {str(d.get("id")): str(d.get("name", "")) for d in devices}
+        self._waits.keep_only(present)  # 2.15: an unpaired phone waits no more
         self.devicesChanged.emit(
             [
                 {"id": d.get("id"), "name": d.get("name"), "last_used": d.get("last_used")}

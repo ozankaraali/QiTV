@@ -3,6 +3,7 @@ import unittest
 
 from services.remote.protocol import (
     BUTTON_META,
+    MAX_TYPED,
     b64d,
     b64e,
     parse_opening,
@@ -240,6 +241,34 @@ class MessageTests(unittest.TestCase):
             dict(every, days=[0], id=""),
         ):
             self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_the_phone_types_into_a_text_box_by_its_number(self):  # 2.15
+        message = {"t": "type", "id": 3, "s": "https://kick.com/example"}
+        self.assertEqual(parse_phone_message(message), {**message, "go": False})
+        go = {"t": "type", "id": 3, "s": "abc", "go": True}  # the phone's Go: Enter follows
+        self.assertEqual(parse_phone_message(go), go)
+        empty = {"t": "type", "id": 0, "s": ""}  # all of it deleted
+        self.assertEqual(parse_phone_message(empty), {**empty, "go": False})
+        long = parse_phone_message({"t": "type", "id": 1, "s": "x" * (MAX_TYPED + 50)})
+        self.assertEqual(len(long["s"]), MAX_TYPED)  # cut: a long link still fits
+        pasted = parse_phone_message({"t": "type", "id": 1, "s": "a\tb\r\nc\x00 دیگر\u200c"})
+        self.assertEqual(pasted["s"], "abc دیگر\u200c")  # control characters go, nothing else
+        for bad in (
+            {"t": "type", "s": "abc"},  # no box
+            {"t": "type", "id": -1, "s": "abc"},
+            {"t": "type", "id": 2**31, "s": "abc"},
+            {"t": "type", "id": "3", "s": "abc"},
+            {"t": "type", "id": True, "s": "abc"},
+            {"t": "type", "id": 3},
+            {"t": "type", "id": 3, "s": None},
+            {"t": "type", "id": 3, "s": ["abc"]},
+            {"t": "type", "id": 3, "s": "abc", "go": "yes"},
+        ):
+            self.assertIsNone(parse_phone_message(bad), bad)
+
+    def test_open_link_opens_the_tvs_card(self):  # 2.15
+        self.assertEqual(parse_phone_message({"t": "link"}), {"t": "link"})
+        self.assertEqual(parse_phone_message({"t": "link", "s": "x"}), {"t": "link"})
 
     def test_messages_validated(self):
         self.assertEqual(parse_phone_message({"t": "down", "b": "up"}), {"t": "down", "b": "up"})

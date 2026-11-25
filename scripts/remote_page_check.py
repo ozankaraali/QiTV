@@ -52,6 +52,7 @@ from services.remote.protocol import (  # noqa: E402
     Get,
     Opened,
     OpenItem,
+    OpenLinkCard,
     Paired,
     Position,
     Press,
@@ -63,6 +64,7 @@ from services.remote.protocol import (  # noqa: E402
     Timer,
     ToTv,
     TrackPick,
+    Typed,
     WatchHere,
 )
 
@@ -2476,6 +2478,137 @@ def scenario_schedule(rig: Rig) -> None:
     assert not rig.events.of(OpenItem, after=mark), "a chip's tap tuned the row"
 
 
+KICK = "https://kick.com/examplechannel"
+
+
+def scenario_typing(rig: Rig) -> None:
+    """2.15: a text box on the TV has the keys: the sheet shows its name and text, the field
+    focused; what is typed goes a moment after the last key (never a letter at a time), a
+    paste at once after it, Go after it as Enter; the box gone closes the sheet. A password
+    box is masked and empty, its Go alone Enter while nothing was typed; Done closes the
+    sheet for that box (named again, it stays closed; the next box opens it)."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.locator("#nowName", has_text="Harbourline News").wait_for()
+    rig.hub.send(sid, {"t": "field", "id": 7, "label": "Find a genre or channel", "text": "har"})
+    rig.page.wait_for_selector("#typeSheet:not([hidden])")
+    assert rig.page.inner_text("#typeLabel") == "Find a genre or channel"
+    assert rig.page.input_value("#typeInput") == "har"
+    assert rig.page.evaluate("document.activeElement.id") == "typeInput"
+    assert rig.page.get_attribute("#typeInput", "enterkeyhint") == "go"
+    mark = rig.events.mark()
+    rig.page.press("#typeInput", "End")
+    rig.page.type("#typeInput", "bourline", delay=30)
+    rig.events.wait(Typed, where=lambda e: e.text == "harbourline", after=mark)
+    sent = rig.events.of(Typed, after=mark)
+    assert len(sent) <= 2, [e.text for e in sent]  # a moment after the last key, not each
+    assert all(e.box == 7 and not e.enter for e in sent), sent
+    rig.shot("typing")
+    mark = rig.events.mark()
+    rig.page.fill("#typeInput", KICK)  # a paste
+    rig.page.press("#typeInput", "Enter")  # Go: the text, then Enter
+    go = rig.events.wait(Typed, where=lambda e: e.enter, after=mark)
+    assert (go.box, go.text) == (7, KICK), go
+    rig.hub.send(sid, {"t": "field"})
+    rig.page.wait_for_selector("#typeSheet", state="hidden")
+    assert rig.page.locator("#veil").is_hidden()
+    # A password box: masked, its text never shown (QiTV never sends it).
+    rig.hub.send(sid, {"t": "field", "id": 8, "label": "Password", "secret": True})
+    rig.page.wait_for_selector("#typeSheet:not([hidden])")
+    assert rig.page.get_attribute("#typeInput", "type") == "password"
+    assert rig.page.input_value("#typeInput") == ""
+    mark = rig.events.mark()
+    rig.page.press("#typeInput", "Enter")  # nothing typed: Enter alone, the password kept
+    rig.events.wait(Press, where=lambda e: e.button == "ok" and not e.down, after=mark)
+    assert not rig.events.of(Typed, after=mark), "an empty text replaced the password"
+    rig.page.type("#typeInput", "hunter2", delay=20)
+    typed = rig.events.wait(Typed, where=lambda e: e.text == "hunter2", after=mark)
+    assert typed.box == 8
+    rig.shot("typing-password")
+    rig.page.click("#typeDone")
+    rig.page.wait_for_selector("#typeSheet", state="hidden")
+    assert rig.page.locator("#veil").is_hidden(), "the veil stayed over the remote"
+    rig.hub.send(sid, {"t": "field", "id": 8, "label": "Password", "secret": True})
+    rig.page.wait_for_timeout(300)
+    assert rig.page.locator("#typeSheet").is_hidden(), "Done's box opened it again"
+    rig.hub.send(sid, {"t": "field", "id": 9, "label": "Username", "text": "demo"})
+    rig.page.wait_for_selector("#typeSheet:not([hidden])")
+    assert rig.page.get_attribute("#typeInput", "type") == "text"
+    assert rig.page.input_value("#typeInput") == "demo"
+
+
+def scenario_open_link(rig: Rig) -> None:
+    """2.15: More → Open a link (a QiTV whose hello says "link"): the sheet at once (in the
+    tap: the phone's keyboard up) and the TV's card opens; a link pasted before the card's field
+    is named goes into it once it is, and Go plays it. An older QiTV's hello says nothing of it:
+    no Open a link."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    assert rig.page.locator("#openLink").is_visible(), "no Open a link"
+    rig.shot("open-link-more")
+    mark = rig.events.mark()
+    rig.page.click("#openLink")
+    rig.events.wait(OpenLinkCard, after=mark)
+    rig.page.wait_for_selector("#typeSheet:not([hidden])")
+    assert rig.page.locator("#moreSheet").is_hidden()
+    assert rig.page.inner_text("#typeLabel") == "Open a link"
+    assert rig.page.evaluate("document.activeElement.id") == "typeInput"
+    rig.page.fill("#typeInput", KICK)
+    rig.page.wait_for_timeout(400)
+    assert not rig.events.of(Typed, after=mark), "typed before the card's field was named"
+    rig.hub.send(sid, {"t": "field", "id": 3, "label": "Open a link", "text": ""})
+    typed = rig.events.wait(Typed, after=mark)
+    assert (typed.box, typed.text, typed.enter) == (3, KICK, False), typed
+    assert rig.page.input_value("#typeInput") == KICK  # kept, not the card's empty text
+    rig.shot("open-link")
+    rig.page.press("#typeInput", "Enter")
+    go = rig.events.wait(Typed, where=lambda e: e.enter, after=mark)
+    assert (go.box, go.text) == (3, KICK)
+    rig.hub.send(sid, {"t": "field"})  # the card took it and went
+    rig.page.wait_for_selector("#typeSheet", state="hidden")
+    # An older QiTV: no "can" in its hello.
+    core = rig.hub._core
+    hello = core.hello
+    core.hello = lambda: {k: v for k, v in hello().items() if k != "can"}
+    mark = rig.events.mark()
+    rig.page.reload()
+    rig.events.wait(Opened, after=mark)
+    rig.page.wait_for_selector("[data-screen=remote]:not([hidden])")
+    rig.page.wait_for_timeout(300)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    assert rig.page.locator("#openLink").is_hidden(), "Open a link for a QiTV that can't open it"
+
+
+def scenario_watch_offline(rig: Rig) -> None:
+    """2.15: Watch on this phone of a channel that isn't live: the phone says so, and plays it
+    once QiTV hands it the stream."""
+    sid = paired_sid(rig)
+    rig.hub.send(sid, STATE)
+    rig.page.click("#moreButton")
+    rig.page.wait_for_selector("#moreSheet:not([hidden])")
+    mark = rig.events.mark()
+    rig.page.click("#watchHere")
+    rig.events.wait(WatchHere, after=mark)
+    ask = rig.events.wait(Get, where=lambda e: e.what == "channels", after=mark)
+    answer(rig, sid, ask, CHANNELS)
+    rig.page.wait_for_selector("#zapRows .row >> nth=2")
+    rig.hub.send(sid, {"t": "play", "failed": True, "why": "offline", "name": "examplechannel"})
+    rig.page.locator("#playerName", has_text="live").wait_for(timeout=5000)
+    text = rig.page.inner_text("#playerName")
+    assert text == "This channel isn't live now · It plays as soon as it's live", text
+    assert rig.page.locator(".player-cap.why").count() == 1
+    rig.shot("watch-offline")
+    link = f"http://localhost:{rig.hub.port}/icon-192.png?stream=kick"
+    rig.hub.send(sid, {"t": "play", "url": link, "name": "examplechannel · Kick", "num": ""})
+    rig.page.wait_for_function(
+        "(url) => document.getElementById('video').getAttribute('src') === url", arg=link
+    )
+    assert rig.page.inner_text("#playerName") == "examplechannel · Kick"
+
+
 def scenario_timer(rig: Rig) -> None:
     """2.8: a channel with no guide records at a time from its timetable: on chosen days, or
     once; a time gone by cannot be sent; QiTV's answer shows by the button."""
@@ -2538,6 +2671,9 @@ def scenario_timer(rig: Rig) -> None:
 SCENARIOS.update(
     {
         "cast": scenario_cast,
+        "typing": scenario_typing,  # 2.15
+        "open-link": scenario_open_link,
+        "watch-offline": scenario_watch_offline,
         "tracks": scenario_tracks,
         "schedule": scenario_schedule,
         "timer": scenario_timer,

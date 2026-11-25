@@ -1247,6 +1247,7 @@
   "This channel can't open right now. Playing what was kept.": "يتعذّر فتح هذه القناة حاليًا. يُشغَّل ما حُفظ.",
   "This channel is already playing": "هذه القناة قيد التشغيل بالفعل",
   "This channel is recording on schedule already.": "هذه القناة قيد التسجيل المجدول بالفعل.",
+  "This channel isn't live now": "هذه القناة ليست مباشرة الآن",
   "This channel's archive isn't available right now": "أرشيف هذه القناة غير متاح حاليًا",
   "This copy of QiTV has a key of its own: yours is optional, and is used instead when set.": "لهذه النسخة من QiTV مفتاح خاص بها: مفتاحك اختياري، ويُستخدم بدلًا منه عند تعيينه.",
   "This film doesn't play on a phone. Tap TV to watch it there.": "هذا الفيلم لا يُشغَّل على الهاتف. اضغط «التلفزيون» لمشاهدته هناك.",
