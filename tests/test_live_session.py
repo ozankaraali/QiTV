@@ -4696,6 +4696,46 @@ class MemoryTests(LiveSessionCase):
         self.assertAlmostEqual(LearnedTarget(kept.learned).target(), 4.0, delta=0.05)
         self.assertEqual(self.tuning.get("B"), Tuning())
 
+    def test_a_sites_tunes_that_starve_right_after_the_start_teach_no_margin(self):
+        # The same on a live site's channel, its prefetch pieces read as made, at Auto's second
+        # (`PREFETCH_FLOOR_S`): each tune plays from the oldest point, 0.2 s on (0.7 s behind
+        # once VLC opened it, so no start aimed at the second), and the source is 1.9 s late
+        # at once. VLC never held a cushion: the batches after the dry run find it as close
+        # to dry as the start left it, and no near-miss counts, as no dry run does. Before,
+        # the dry run's own wander widened the band past the second, and the mean lag (carried
+        # on through the silence) read 0.9 s while VLC held 0.2 s: each tune taught a second
+        # more, the target 1, 2, then 3 s.
+        floor = learned_target.PREFETCH_FLOOR_S
+        for shape in ("flow", "pieces"):
+            self.tuning = LiveTuning(None)
+            self.live = self.make()
+            for tune in range(5):
+                with self.subTest(shape=shape, tune=tune):
+                    self.start(latency=AUTO, channel="B")
+                    self.engine.answer()
+                    sid = self.engine.last_sid
+                    if shape == "pieces":  # 0.3 s more where each 4.25 s piece ends
+                        feed = site_feed(self, sid, edge=0.2)
+                        feed.starved = PlaybackState.PLAYING
+                    else:  # at real time, a quarter second at a time
+                        feed = Feed(self, sid, burst=0.0, edge=0.2, hls=True)
+                        feed.starved, feed.prefetching = PlaybackState.PLAYING, True
+                        feed.push()
+                    feed.ready(backlog_after_start=False)
+                    feed.stalled = True  # silent for the second the start waits (2.1)
+                    feed.run(1.0)
+                    feed.stalled = False
+                    feed.run(0.25)
+                    feed.stalled = True
+                    feed.run(1.9)
+                    feed.stalled = False
+                    feed.run(5.0)
+                    self.assertGreater(feed.starved_s, 0.5)
+                    self.assertEqual(self.live._learned.prior.margin(), 0.0)
+                    self.assertAlmostEqual(self.timelines[-1]["target"], floor, delta=0.05)
+            with self.subTest(shape=shape):
+                self.assertEqual(self.tuning.get("B"), Tuning())  # nothing learned, none kept
+
     def test_a_channel_that_cannot_change_speed_plays_at_1x_from_its_next_tune(self):
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             self.tune("A", edge=12.0, crawl=True).run(10.0)
@@ -9568,6 +9608,33 @@ class PrefetchTargetTests(LiveSessionCase):
         feed.run(5.0)
         self.assertGreater(self.timelines[-1]["target"], before + 1.0)
         self.assertTrue(self.timelines[-1]["adjusted"])
+
+    def test_once_settled_a_near_miss_and_a_dry_run_still_teach(self):
+        # The cushion's guard (`_ran_out`): settled at Auto's second, the lag and the media VLC
+        # had ahead of it have both reached it, so trouble now teaches a margin. The source
+        # goes silent, then sends all it owed (late, never lost, never a stall): left within
+        # 0.15 s of running dry, VLC was all but dry (a near-miss); silent 1.9 s, it runs dry.
+        for dry in (False, True):
+            with self.subTest(dry=dry):
+                self.live = self.make()
+                sid = self.start(latency=AUTO, channel="ch")
+                feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+                feed.run(180.0)
+                learned, starved = self.live._learned, feed.starved_s
+                self.assertEqual(learned.prior.margin(), 0.0)
+                before, timelines = self.timelines[-1]["target"], len(self.timelines)
+                quiet = 1.9 if dry else self.timelines[-1]["lag"] - 0.15
+                quiet = round(quiet / Feed.DT) * Feed.DT
+                feed.stalled = True
+                feed.run(quiet)
+                feed.stalled = False
+                feed.edge += quiet
+                feed.push()
+                feed.run(10.0)
+                self.assertEqual(feed.starved_s > starved, dry)
+                self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
+                self.assertGreater(learned.prior.margin(), 0.0)
+                self.assertGreater(self.timelines[-1]["target"], before + 0.5)
 
     def test_normal_is_unchanged_for_a_prefetch_source(self):
         sid = self.tune("normal")

@@ -380,6 +380,7 @@ _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
 # ring holds bytes, so a rising bitrate or a wait moves its oldest point on faster than 1x.
 _REWIND_MARGIN_S = 30.0
 _BELOW_TARGET_S = 0.25  # Go live never lands a mean lag further below the target
+_CUSHION_BAND_SHARE = 0.5  # the band takes at most this share of the target off the cushion
 _LAND_ABOVE_S = 0.75  # Go live lands at most this far above the target (when a start is there)
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
@@ -814,6 +815,7 @@ class LiveSession(QObject):
         self._rate_minute, self._rate_lines = -1, 0
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
+        self._cushion_room = 0.0  # and the most media VLC had ahead of it there (`_ran_out`)
         # 2.2: the recording under way (its id at the engine) and since when (the clock's);
         # every recording started whose end the engine has not told yet.
         self._recording: Optional[str] = None
@@ -1023,7 +1025,7 @@ class LiveSession(QObject):
         self._troubled_at = None
         self._forget_feed()
         self._said = None
-        self._cushion = 0.0
+        self._cushion = self._cushion_room = 0.0
         self._repick_until, self._repick_step = -math.inf, None
         self._land_offset, self._land_check = 0.0, None  # each tune's own, never the channel's
         self._shrink_to = None
@@ -2474,6 +2476,7 @@ class LiveSession(QObject):
         self._arm_caption_wait()
         if aimed:
             self._cushion = max(self._cushion, target)
+            self._cushion_room = max(self._cushion_room, target)
         self._reland_until = self._clock() + _RELAND_S
         self._reland_edge = self._live_edge(snapshot)
         self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
@@ -3029,6 +3032,8 @@ class LiveSession(QObject):
         live = not self._ended and snapshot.get("finite") is not True
         if live and not self._paused and self._stay.mode is Mode.LIVE:
             self._cushion = max(self._cushion, lag)  # the largest lag at the edge so far
+            room = self._live_edge(snapshot) - position
+            self._cushion_room = max(self._cushion_room, room)
         # Whether trouble now runs out a cushion, judged before it raises the target.
         cushioned = self._ran_out(snapshot)
         breaking = self._sits_out(snapshot, position)
@@ -3454,19 +3459,28 @@ class LiveSession(QObject):
                 self._stay.trouble()
 
     def _ran_out(self, snapshot: Mapping[str, Any]) -> bool:
-        """VLC running dry (or a stall) now runs out a cushion: the lag had reached the target
-        since the tune (less `_BELOW_TARGET_S`; under Auto, less stay-live's band as wide as
-        the estimate's wander, not the budget's widening: a learned rise within it is drift,
-        built by nothing, so the lag in the band is at the target),
+        """VLC running dry (or a stall) now runs out a cushion: the lag, and the media VLC had
+        ahead of it, had reached the target since the tune (less `_BELOW_TARGET_S`; under
+        Auto, less stay-live's band as wide as the estimate's wander, not the budget's
+        widening: a learned rise within it is drift, built by nothing, so the lag in the band
+        is at the target; at most `_CUSHION_BAND_SHARE` of the target),
         or the tune started at a pick chosen for it, or stay-live accepted the start's
         shortfall (nothing further back was buffered: it never had the cushion, so running
         dry is trouble all the same). A lag within a steady source's calm band
         (`StayLive.calm`) is at the target too: a start that landed short inside it is never
         built, nor its shortfall accepted (review R1)."""
+        target = self._target(snapshot)
         below = max(_BELOW_TARGET_S, self._stay.calm(-1))
         if self._learned is not None:
-            below = max(below, self._stay.dead_band())
-        return self._cushion >= self._target(snapshot) - below or self._stay.shortfall_accepted
+            # At most half the target: a band as wide as a one-second target, or widened by the
+            # wander a dry run itself made, would read any lag as the cushion.
+            band = min(self._stay.dead_band(), _CUSHION_BAND_SHARE * target)
+            below = max(below, band)
+        # The media VLC had ahead of it reached it too: the mean lag also counts how late the
+        # source is (carried on at real time through a silence, it read 0.9 s after a dry run
+        # while VLC held 0.2 s), which is no cushion.
+        cushion = min(self._cushion, self._cushion_room)
+        return cushion >= target - below or self._stay.shortfall_accepted
 
     def _learn(
         self, *, direct: bool = False, learned_only: bool = False, software: bool = False
