@@ -306,7 +306,6 @@ from services.live.stay_live import (
     AUTO,
     LATENCIES,
     STALL_S,
-    TARGETS,
     Decision,
     LagFilter,
     Mode,
@@ -725,6 +724,9 @@ class LiveSession(QObject):
         self._failing_since: Optional[float] = None  # first interruption since VLC played
         self._opening = False  # inside playback.play(): its errors are retried on a tick
         self._held: Optional[float] = None  # VLC held at the edge since (`_hold_at_edge`)
+        # The source reads its playlist's prefetch pieces as they are made (the helper's
+        # `prefetching`, as its HLS states last said: `_follow_prefetch`).
+        self._prefetching = False
         # A live site's ad break (the helper's `ad_break`): it goes on, when it ended while VLC
         # fills up again after it (None: none), and whether the hold is the break's.
         self._ad_break = False
@@ -1008,6 +1010,7 @@ class LiveSession(QObject):
                 self._tuning.remember(channel, self._memory)
         self._software = self._memory.software
         self._latency = latency if latency in LATENCIES else "normal"
+        self._prefetching = False  # the tune's source says so in its states
         self._learned = self._new_learned() if self._latency == AUTO else None
         self._steered, self._steer_burst = SteeredTarget(), None
         self._troubled_at = None
@@ -1374,6 +1377,7 @@ class LiveSession(QObject):
             return
         self._latency = name
         self._stay.set_latency(name)
+        self._stay.close = self._close_to_live()
         if name != AUTO:
             if self._learned is not None:
                 self._learn(learned_only=True)  # what it learned so far stays the channel's
@@ -3042,6 +3046,7 @@ class LiveSession(QObject):
             self._stay.burst = self._filter.burst
             self._stay.spare = self._spare()
             self._stay.steady = self._filter.kept <= 0  # no kept burst: the calm band
+            self._stay.close = self._close_to_live()  # a live site's pieces as made, Low or Auto
             self._stay.caption_floor = self._caption_floor
             self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
             self._stay.flooding = self._flooding(snapshot)
@@ -3512,31 +3517,47 @@ class LiveSession(QObject):
 
     def _new_learned(self) -> LearnedTarget:
         """The channel's learned target for this tune: from what it taught (or a 2.0.2
-        `extra`, read as a prior), on Normal's floor, with the run's burst floor switch."""
+        `extra`, read as a prior), on Normal's floor, with the run's burst floor switch; on a
+        source that reads its prefetch pieces as they are made, as `_follow_prefetch` set it."""
         memory = self._memory
-        return LearnedTarget(
+        learned = LearnedTarget(
             memory.learned,
             memory.extra,
             floor=start_target(AUTO),
             segment_floor=SEGMENT_FLOOR,
         )
+        if self._prefetching:
+            learned.streams()
+        return learned
 
     def _follow_prefetch(self, snapshot: Mapping[str, Any]) -> None:
-        """Under Auto, a source that reads its playlist's prefetch pieces as they are made
-        (`prefetching`) waits for no whole piece: the need an earlier tune of the channel
-        remembered (one learned from whole pieces held a live site's start ~6 s back, its
-        target duration) no longer stands in for this tune's own (`LearnedTarget.streams`); the
-        steered target follows at once. The channel's next save keeps what this tune learned."""
-        learned = self._learned
-        if learned is None or learned.arrivals.remembered is None:
+        """Whether the source reads its playlist's prefetch pieces as they are made (2026-11-25:
+        `prefetching`, as an HLS source's states say; a state before one is known says
+        nothing). While it does, Low's and Stable's targets are their own
+        (`PREFETCH_TARGETS`), Low and Auto are held close (`StayLive.close`), and under Auto
+        the learned target streams (`LearnedTarget.streams`: its floor a second, and the need
+        an earlier tune of the channel remembered, one learned from whole pieces that held a
+        live site's start ~6 s back, no longer standing in for this tune's own); the steered
+        target follows at once, either way. The channel's next save keeps what this tune
+        learned."""
+        if snapshot.get("hls") is not True:
             return
-        if snapshot.get("prefetching") is not True:
+        prefetching = snapshot.get("prefetching") is True
+        if prefetching == self._prefetching:
+            return
+        self._prefetching = prefetching
+        self._stay.close = self._close_to_live()
+        learned = self._learned
+        if learned is None:
             return
         burst = self._filter.burst_for(_number(snapshot.get("burst_s")))
-        before = learned.target(burst)
-        learned.streams()
-        self._steered.shift(min(0.0, learned.target(burst) - before))
-        _LOG.info("The channel's pieces come as they are made: its remembered need is set aside.")
+        before, remembered = learned.target(burst), learned.arrivals.remembered
+        learned.streams(prefetching)
+        self._steered.shift(learned.target(burst) - before)
+        if prefetching and remembered is not None:
+            _LOG.info(
+                "The channel's pieces come as they are made: its remembered need is set aside."
+            )
 
     def _spare(self) -> float:
         """Under Auto, a kept burst's target holds the burst's room and its own margin: a lag
@@ -3909,11 +3930,19 @@ class LiveSession(QObject):
                 self._held = now
                 self._playback.hold(True)
             return
-        cushion = ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target)
+        cushion = ahead >= self._hold_cushion()
         proven = rate >= _HOLD_FLOWING if rate is not None else not self._unproven
         flowing = proven or now - self._held >= _HOLD_MAX_S
         if quiet < _HOLD_QUIET_S and cushion and flowing:
             self._release_hold(snapshot, position)
+
+    def _hold_cushion(self) -> float:
+        """What a hold at the edge (`_hold_at_edge`, an ad break's) plays again with: that share
+        of stay-live's target, at least `_HOLD_MIN_S`; held close to live (`_close_to_live`),
+        never more than the target (`_HOLD_MIN_S` is four times Low's: caught up after)."""
+        target = self._stay.target
+        cushion = max(_HOLD_MIN_S, _HOLD_SHARE * target)
+        return min(cushion, target) if self._close_to_live() else cushion
 
     def _sits_out(self, snapshot: Mapping[str, Any], position: float) -> bool:
         """A live site's ad break goes on (the helper skips its pieces: `ad_break`), or VLC
@@ -3952,7 +3981,7 @@ class LiveSession(QObject):
             if self._ad_break:
                 self._ad_held = True
             elif self._ad_held:
-                cushion = ahead >= max(_HOLD_MIN_S, _HOLD_SHARE * self._stay.target)
+                cushion = ahead >= self._hold_cushion()
                 if now - self._edge_moved < _HOLD_QUIET_S and cushion:
                     self._release_hold(snapshot, position)
             return
@@ -4460,7 +4489,17 @@ class LiveSession(QObject):
         burst = self._burst(snapshot)
         if self._learned is not None:
             return self._auto_target(burst)
-        return max(TARGETS[self._latency], burst)
+        return max(self._latency_target(), burst)
+
+    def _latency_target(self) -> float:
+        """The chosen latency's own target (not Auto): `TARGETS`, its own on a source that
+        reads its prefetch pieces as they are made (`PREFETCH_TARGETS`: Low half a second)."""
+        return start_target(self._latency, prefetching=self._prefetching)
+
+    def _close_to_live(self) -> bool:
+        """A source that reads its prefetch pieces as they are made, under Low or Auto: held
+        within a second of live (`StayLive.close`)."""
+        return self._prefetching and self._latency in ("low", AUTO)
 
     def _aim(self, snapshot: Mapping[str, Any]) -> float:
         """Where a start lands (a tune, Go live, a jump): the target, and while AI captions
@@ -4502,7 +4541,7 @@ class LiveSession(QObject):
         burst = self._filter.burst
         if self._learned is not None:
             return max(self._auto_target(burst), self._caption_floor)
-        return max(TARGETS[self._latency], burst, self._caption_floor)
+        return max(self._latency_target(), burst, self._caption_floor)
 
     @staticmethod
     def _live_edge(snapshot: Mapping[str, Any]) -> float:

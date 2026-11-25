@@ -3791,20 +3791,65 @@ video.m3u8
 
     def test_starts_at_the_first_prefetch_piece(self):
         # Under Auto, Normal and Low: not the target's depth back from the end (three 6 s
-        # target durations, Kick's: 7.6 s behind the clock in all). Under Stable (ruling R4),
-        # its cushion: as far back as without prefetch pieces.
+        # target durations, Kick's: 7.6 s behind the clock in all). Under Stable (2026-11-25,
+        # replacing ruling R4): its 6 s target back from where the pieces being made begin.
         names = [f"s{number}.ts" for number in range(8)]
         copy = prefetching(0, names, ["p8.ts", "p9.ts"], target=2)
         cases = (  # (latency, live delay, the session's target, the first piece fetched)
-            ("auto", 6.0, 3.0, "p8.ts"),
+            ("auto", 6.0, 1.0, "p8.ts"),
             ("normal", 6.0, 2.5, "p8.ts"),
-            ("low", 3.0, 1.0, "p8.ts"),
-            ("stable", 12.0, 6.0, "s2.ts"),  # 12 s back from the last finished piece's end
+            ("low", 3.0, 0.5, "p8.ts"),
+            ("stable", 12.0, 6.0, "s5.ts"),  # 6 s back from the last finished piece's end
         )
         for latency, delay, target, first in cases:
             with self.subTest(latency=latency):
                 server = self.copies([copy], names + ["p8.ts", "p9.ts"])
                 self.run_for(server, 0.5, live_delay=delay, target=target)
+                self.assertEqual(requested_segments(server)[0], first)
+
+    @staticmethod
+    def site_copy(count, length, target, prefetch=2):
+        """A live site's media playlist: `count` finished pieces of `length` seconds (s0.ts
+        on) under a `target` s target duration, then `prefetch` pieces still being made
+        (Kick: 4.167 s pieces, 6 s target duration; Twitch: 2 s pieces), and their names."""
+        names = [f"s{number}.ts" for number in range(count)]
+        made = [f"p{count + number}.ts" for number in range(prefetch)]
+        text = f"#EXTM3U\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:{length},live\n{name}\n" for name in names)
+        text += "".join(f"#EXT-X-PREFETCH:{name}\n" for name in made)
+        return text.encode(), names + made
+
+    def test_stable_on_a_prefetch_source_starts_about_six_seconds_back_and_targets_six(self):
+        # 2026-11-25 (replaces ruling R4, which kept 3 target durations: 18 s back on Kick,
+        # where the start Stable aims at is 6 s): the piece that begins Stable's 6 s target
+        # before the pieces being made (the live edge is in the first of them, so at least
+        # that far behind it), counted over the pieces' own lengths. The session picks its
+        # start at 6 s from what that brings (`StablePrefetchTests`): there at once.
+        cases = (  # (piece length, target duration, the first piece without prefetch, with)
+            (4.167, 6, "s3.ts", "s6.ts"),  # Kick: 8.3 s before the first prefetch piece
+            (2.0, 6, "s0.ts", "s5.ts"),  # Twitch: 6 s before it
+        )
+        for length, target, today, first in cases:
+            with self.subTest(length=length):
+                copy, pieces = self.site_copy(8, length, target)
+                server = self.copies([copy], pieces)
+                self.run_for(server, 0.5, live_delay=12.0, target=6.0)
+                self.assertEqual(requested_segments(server)[0], first)
+                plain = hls(0, pieces[:8], target=target).replace(
+                    f"#EXTINF:{target},".encode(), f"#EXTINF:{length},".encode()
+                )
+                server = self.copies([plain], pieces[:8])
+                self.run_for(server, 0.5, live_delay=12.0, target=6.0)
+                self.assertEqual(requested_segments(server)[0], today)  # without: as today
+
+    def test_a_resumed_stable_run_joins_its_earlier_one_as_far_back_as_today(self):  # 2.8
+        # Stable's shallower start on a prefetch source is a fresh start's: a resumed run
+        # still goes on after its earlier one's last piece as far back as the usual depth.
+        copy, pieces = self.site_copy(8, 4.167, 6)
+        for after, first in ((2, "s3.ts"), (0, "s6.ts")):
+            with self.subTest(after=after):
+                server = self.copies([copy], pieces)
+                self.run_for(server, 0.5, live_delay=12.0, target=6.0, after_seq=after)
                 self.assertEqual(requested_segments(server)[0], first)
 
     def test_a_resumed_run_joins_its_earlier_one_before_the_prefetch_pieces(self):  # 2.8
@@ -3870,7 +3915,7 @@ video.m3u8
         # finished pieces first). The media still to come counts finished pieces only.
         names = [f"s{number}.ts" for number in range(8)]
         copy = prefetching(0, names, ["p8.ts", "p9.ts"], target=2)
-        for delay, target, before in ((6.0, 2.5, []), (12.0, 6.0, names[2:])):
+        for delay, target, before in ((6.0, 2.5, []), (12.0, 6.0, names[5:])):
             with self.subTest(live_delay=delay):
                 server = self.copies([copy], names + ["p8.ts", "p9.ts"])
                 stop = threading.Event()
@@ -3893,8 +3938,8 @@ video.m3u8
                 finally:
                     source.close()
                 self.assertEqual(seen, before)
-                if before:  # s2..s7: 2 s each, nothing counted for p8 and p9
-                    self.assertEqual(rest[0], (2, 10.0))
+                if before:  # s5..s7 (Stable's 6 s): 2 s each, nothing counted for p8 and p9
+                    self.assertEqual(rest[0], (5, 4.0))
 
     def test_a_prefetch_piece_that_breaks_is_skipped_once(self):
         # Missing, or cut off after its first bytes: skipped with a marker, never asked again

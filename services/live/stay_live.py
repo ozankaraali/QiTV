@@ -100,6 +100,18 @@ adds to the lag by itself. 2.0.2's Auto (1.5 s per starvation or stall, 0.5 s of
 quiet minutes) stays in the tests (`tests/auto_target.py`), the reference the learned target
 is measured against.
 
+A source that reads its pieces as they are made (a live site's HLS prefetch pieces, 2026-11-25)
+plays half a second behind its edge under Low (`PREFETCH_TARGETS`) and a second under Auto (the
+learned target's floor while it does), so people watch in step with the site's chat. Held that
+close (the caller's `close`), its dead band is `_CLOSE_BAND_S` either side (a second either side
+of half a second is a lag of 1.5 s left as it is), with no calm band; what a landing left above
+it (the start Go live picked: the newest keyframe, up to an interval back, and VLC's open, which
+its pick may underrate: a lag behind the band within `_START_S` of the landing, nothing troubled
+since) is taken off as soon as the urgent cases are, at `_CLOSE_UP`, outside the budget (a
+gentle nudge 15 s on would hold the first minute a second or two behind); and too little room
+is under `_CLOSE_ROOM_S`, about VLC's own caching (at Low every lag short of the target is
+under `_ROOM_S`). Under Normal and Stable it steers as any source.
+
 Pure logic; the caller feeds the measured lag and applies the returned Decision.
 """
 
@@ -113,6 +125,10 @@ import math
 from typing import Optional
 
 TARGETS = {"low": 1.0, "normal": 2.5, "stable": 6.0}
+# A source that reads its playlist's prefetch pieces as they are made (2026-11-25): Low within
+# a second of live (VLC holds 0.3 s of it; a weak connection may stall), Stable from a start
+# that far back too (the source's); Normal as any. Auto: `learned_target.PREFETCH_FLOOR_S`.
+PREFETCH_TARGETS = {"low": 0.5, "stable": 6.0}
 AUTO = "auto"  # the latency setting that learns each channel's target (learned_target)
 LATENCIES = (AUTO, *TARGETS)
 
@@ -163,6 +179,10 @@ _BACKLOG_UP = 1.05
 _BACKLOG_TAKE_S = 480.0  # ... when _GENTLE_UP would take longer than this; and up to this
 _BACKLOG_MAX_S = 30.0  # far behind the target (beyond it, and _REOPEN's, the reopen at live)
 _GENTLE = (_GENTLE_UP, _GENTLE_DOWN, _BACKLOG_UP)  # the budget counts these when they ran
+# A source held close to live (2026-11-25, `StayLive.close`): its dead band either side ...
+_CLOSE_BAND_S = 0.3
+_CLOSE_UP = 1.05  # ... the rate that takes off what a landing left above it ...
+_CLOSE_ROOM_S = 0.3  # ... and too little room: under VLC's own caching (0.3 s), about
 # Junctions (2.8.5): a source that restarts often takes back what stay-live is behind.
 _JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
 _JUNCTION_REF_S = 300.0  # ... the highest target of this long at least (twice at most)
@@ -196,9 +216,15 @@ _SHOWN_STEP_S = 0.5
 _SHOWN_HOLD_S = 3.0
 
 
-def start_target(latency: str) -> float:
-    """The target a latency setting starts with (Auto: Normal's); KeyError if unknown."""
-    return TARGETS["normal"] if latency == AUTO else TARGETS[latency]
+def start_target(latency: str, *, prefetching: bool = False) -> float:
+    """The target a latency setting starts with (Auto: Normal's); KeyError if unknown. On a
+    source that reads its playlist's prefetch pieces as they are made (`prefetching`), its own
+    under Low and Stable (`PREFETCH_TARGETS`); Auto's floor is then the learned target's."""
+    if latency == AUTO:
+        return TARGETS["normal"]
+    if prefetching:
+        return PREFETCH_TARGETS.get(latency, TARGETS[latency])
+    return TARGETS[latency]
 
 
 class Mode(str, Enum):
@@ -549,6 +575,7 @@ class _Nudge:
     limit: Optional[float] = None  # a start's build: seconds below 1x it has left (budget-free)
     reason: str = ""  # why it runs at its peak, as the caller's log says it (2.13.4)
     backlog: bool = False  # it catches up a backlog the source sent (`StayLive._catch_up`)
+    own: bool = False  # it takes off what a landing left on a close source (budget-free)
 
     @property
     def step(self) -> float:
@@ -571,6 +598,11 @@ class StayLive:
         # `calm`), and the AI captions' floor the lag is not to fall short of (0.0: off).
         self.steady = False
         self.caption_floor = 0.0
+        # Set by the caller (2026-11-25): the source reads its pieces as they are made and is
+        # held within a second of live (a live site's prefetch pieces under Low or Auto): the
+        # narrow band (`_CLOSE_BAND_S`, no calm band), a landing's excess taken off at once
+        # (`_CLOSE_UP`), too little room under `_CLOSE_ROOM_S`.
+        self.close = False
         # Set by the caller: how far under the target the lag may be while VLC still has the
         # room it needs (Auto with a burst the lag filter keeps: the target's margin over that
         # burst's own room). Only a lag under the target by more than this, beyond the band,
@@ -640,6 +672,7 @@ class StayLive:
         # nor once the lag was back in the band after the stream played (`_own_shortfall`).
         self._landed_at: Optional[float] = None
         self._in_band = 0.0  # seconds the lag was back in the band since (`_BACK_IN_S`)
+        self._troubled = False  # VLC ran out of room since the last landing (`close`)
 
     @property
     def nudge(self) -> float:
@@ -659,14 +692,18 @@ class StayLive:
 
     def band(self, side: int) -> float:
         """How far the lag may be from the target on `side` (+1 behind, -1 ahead)."""
-        band = max(_BAND_S, _BAND_SPREAD * self.spread, self._wide)
+        band = max(self._least(), _BAND_SPREAD * self.spread, self._wide)
         return band + (_BAND_BURST * self.burst if side > 0 else 0.0)
+
+    def _least(self) -> float:
+        """The least the dead band reaches either side: `_BAND_S`; `_CLOSE_BAND_S` held close."""
+        return _CLOSE_BAND_S if self.close else _BAND_S
 
     def calm(self, side: int) -> float:
         """How far from the target a steady source's lag may be on `side` before a gentle
         nudge (`_CALM_S`, `_CALM_SHARE`; 0.0: the band alone): within it the lag is at the
-        target (the caller's cushion reads it so too)."""
-        if not self.steady:
+        target (the caller's cushion reads it so too). None for a source held close."""
+        if not self.steady or self.close:
             return 0.0
         share = _CALM_SHARE * self.target
         if side > 0:
@@ -737,6 +774,7 @@ class StayLive:
         self._accepting, self._tolerant = False, not build
         self._landed_at = None  # the target in force at the next update
         self._in_band = 0.0
+        self._troubled = False
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def source_stepped(self) -> None:
@@ -778,6 +816,7 @@ class StayLive:
         behind it changes nothing, a catch-up included."""
         self._owed = True
         self._short_for = 0.0
+        self._troubled = True
 
     def user_paused(self) -> None:
         """A pause leaves LIVE, and a catch-up too: it resumes time-shifted at 1x."""
@@ -929,13 +968,13 @@ class StayLive:
 
     def dead_band(self) -> float:
         """The band as wide as the estimate's wander, not as the budget widened it."""
-        return max(_BAND_S, _BAND_SPREAD * self.spread)
+        return max(self._least(), _BAND_SPREAD * self.spread)
 
     def _jump(self, now: float) -> Decision:
         """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
         gentle nudge it cut counts against the budget (it ran)."""
         nudge = self._nudge
-        if nudge is not None and nudge.peak in _GENTLE and nudge.limit is None:
+        if nudge is not None and nudge.peak in _GENTLE and nudge.limit is None and not nudge.own:
             self._nudged_at = now
         self._rate, self._nudge = 1.0, None
         self._reopened = True
@@ -1122,8 +1161,9 @@ class StayLive:
         return over <= band + _BAND_BURST * self.burst or landing <= lag - _JUMP_CLOSER_S
 
     def _short(self, lag: float) -> bool:
-        """Under `_ROOM_S` left when a burst lands (a steady source: at all): VLC runs dry."""
-        return lag - self.burst / 2 < _ROOM_S
+        """Under `_ROOM_S` left when a burst lands (a steady source: at all): VLC runs dry.
+        Held close, under `_CLOSE_ROOM_S` (Low's whole target is `_ROOM_S`)."""
+        return lag - self.burst / 2 < (_CLOSE_ROOM_S if self.close else _ROOM_S)
 
     def _room_reason(self) -> str:
         """Why a slow-down for room runs, as the log says it (`_short`)."""
@@ -1135,7 +1175,7 @@ class StayLive:
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
         far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
         room = lag - self._centre(-1, urgent=True)  # short of room: built to the target
-        short = room < -_BAND_S and self._short(lag) and not self._accepting
+        short = room < -self._least() and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
         under = short or (ahead < -max(self.band(-1), self.calm(-1)) and not tolerated)
         side = 1 if far or behind > max(self.band(1), self.calm(1)) else -1 if under else 0
@@ -1155,7 +1195,18 @@ class StayLive:
             self._outside, self._side = 0.0, side
         self._outside += dt
         start = side < 0 and self._start > 0  # the start's shortfall: built once, gently
-        urgent = far or short or start
+        # Held close: behind the band within a landing's window, nothing troubled since, is the
+        # landing's (the newest keyframe, VLC's open): taken off at once (`_CLOSE_UP`), once
+        # the stream that opened plays (its lag is known then).
+        own = (
+            self.close
+            and side > 0
+            and not far
+            and self._landing > 0
+            and not self._troubled
+            and not self.hold_reopen
+        )
+        urgent = far or short or start or own
         self._urgent = urgent
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
             return False
@@ -1191,6 +1242,9 @@ class StayLive:
                 limit=_START_BUILD_S,
                 reason="building the start's room",
             )
+        elif own:
+            reason = "what the landing left above the target"
+            nudge = _Nudge(_CLOSE_UP, abs(error), self._centre(side), reason=reason, own=True)
         else:
             up = self._up_rate(abs(error))  # a landing's excess can take long at 1.03x
             peak = _FAST if far else _SLOW if short else up if side > 0 else _GENTLE_DOWN
@@ -1286,6 +1340,8 @@ class StayLive:
         if nudge.ending and self._rate == 1.0:
             if nudge.limit is not None:  # the start's build ran (outside the budget) ...
                 self._accepting = True  # ... and the rest is accepted
+            elif nudge.own:
+                pass  # what a landing left on a close source: outside the budget
             elif nudge.peak in _GENTLE or nudge.backlog:
                 if nudge.cut:
                     self._uncharged = now  # counts unless the owed slow-down follows

@@ -489,6 +489,7 @@ class Feed:
         self.before = []  # the lag right before each arrival
         self.restarts = self.steered = None  # 2.8.5: the helper's restart counts, if any
         self.ad_break = None  # the helper skips a live site's ad break (None: not said)
+        self.prefetching = None  # a live site's prefetch pieces, read as made (None: not said)
         self.push()
 
     def push(self):
@@ -509,6 +510,7 @@ class Feed:
             restarts=self.restarts,
             steered=self.steered,
             ad_break=self.ad_break,
+            prefetching=self.prefetching,
         )
 
     def ready(self, backlog_after_start=True):
@@ -1730,10 +1732,10 @@ class StartPolicyTests(LiveSessionCase):
                     self.assertEqual(self.playback.plays, [])
                     self.assertEqual(self.notices, [LOADING])
 
-    def test_only_stable_starts_behind_a_playlists_prefetch_pieces(self):
-        # Ruling R4: the source starts at a playlist's prefetch pieces for a live delay up to
-        # its bound (Low, Normal, Auto); Stable's (the cushion for jittery providers) keeps
-        # its depth.
+    def test_only_stable_starts_its_target_behind_a_playlists_prefetch_pieces(self):
+        # The source starts at a playlist's prefetch pieces for a live delay up to its bound
+        # (Low, Normal, Auto); Stable's starts its 6 s target back from them (2026-11-25,
+        # replacing ruling R4's 3 target durations: `PrefetchTargetTests`).
         from services.live import source
 
         for latency, delay in live_session.LIVE_DELAY.items():
@@ -6813,9 +6815,10 @@ class LearnedTargetTests(LiveSessionCase):
         # edge): a tune that now reads them so (`prefetching`) starts at the floor's target and
         # learns its own need. A source that does not keeps what it remembered.
         self.tuning.remember("ch", Tuning(learned=Learned(need=6.0)))
-        # Starts 11, 9, 7, 5 and 3 s behind once VLC opened them (0.5 s).
+        # Starts 11, 9, 7, 5, 3 and 1 s behind once VLC opened them (0.5 s); a prefetch
+        # source's floor is a second (2026-11-25: `PREFETCH_FLOOR_S`).
         spans = segments(0, 5)
-        for prefetching, target, seq in ((True, 2.5, 4), (False, 6.0, 2)):
+        for prefetching, target, seq in ((True, 1.0, 5), (False, 6.0, 2)):
             with self.subTest(prefetching=prefetching):
                 self.live = self.make()
                 sid = self.start(latency=AUTO, channel="ch")
@@ -9487,3 +9490,201 @@ class BorrowedTests(LiveSessionCase):
         self.start()  # another channel, opened as usual
         self.assertEqual(self.given, [True])
         self.assertEqual(len(self.engine.opened), 1)
+
+
+def site_feed(case, sid, *, edge, wait=0.3, piece=4.25):
+    """A live site's source read at its prefetch pieces (`prefetching`): media at real time
+    a quarter second at a time, the edge standing still `wait` s more where each `piece`
+    ends (the next piece's request), what was made meanwhile coming at once."""
+    feed = Feed(case, sid, burst=0.0, edge=edge, hls=True)
+    feed.prefetching = True
+    quarters = round(piece / 0.25)
+    feed.gaps = itertools.cycle([0.25] * (quarters - 1) + [0.25 + wait])
+    feed.sizes = itertools.cycle([0.25] * (quarters - 1) + [0.25 + wait])
+    feed.push()
+    return feed
+
+
+class PrefetchTargetTests(LiveSessionCase):
+    """2026-11-25 (the owner, next to the site's own player: QiTV ~1 s behind it; "people
+    enjoy when they sync with the chat"): a source that reads its playlist's prefetch pieces
+    as they are made (`prefetching`) plays half a second behind its edge under Low
+    (`PREFETCH_TARGETS`), a second under Auto (`PREFETCH_FLOOR_S`, rising only after
+    trouble) and 6 s under Stable, from a start that far back (the source's); Normal stays
+    at 2.5 s. Held that close (`StayLive.close`), its band is narrow, a landing's excess (up
+    to a keyframe interval) is taken off within seconds, and a hold at the edge plays again
+    at the target. Any other source keeps today's numbers."""
+
+    def tune(self, latency, *, prefetching=True, **kwargs):
+        sid = self.start(latency=latency, channel="ch")
+        kwargs.setdefault("live_edge", 6.15)
+        self.engine.buffer(
+            sid, segments(0, 3), open_seq=3, hls=True, prefetching=prefetching, **kwargs
+        )
+        self.engine.sessionReady.emit(sid)
+        return sid
+
+    def lags(self, feed, seconds):
+        """The mean lag the session steers by, each tick over `seconds` of `feed`."""
+        lags = []
+        for _ in range(round(seconds / 0.25)):
+            feed.run(0.25)
+            lags.append(self.timelines[-1]["lag"])
+        return lags
+
+    def test_a_prefetch_source_under_low_targets_half_a_second(self):
+        sid = self.tune("low")
+        self.assertEqual(self.live._target(self.engine.snapshot(sid)), 0.5)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["target"], 0.5)
+        self.assertEqual(self.live._stay.target, 0.5)
+        self.assertTrue(self.live._stay.close)
+
+    def test_a_prefetch_source_under_auto_floors_at_one_second(self):
+        # A flow at real time, 0.3 s more between its pieces: the learned target with no
+        # trouble is the floor's (no near-miss, its need under it), the lag held at it.
+        # After a starvation it rises as today.
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        feed.run(0.25)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0)
+        lags = self.lags(feed, 180.0)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0, delta=0.15)
+        self.assertFalse(self.timelines[-1]["adjusted"])  # no margin: no trouble
+        self.assertTrue(self.live._stay.close)
+        tail = lags[-240:]  # the last minute
+        self.assertLessEqual(sum(tail) / len(tail), 1.3)
+        self.assertEqual(feed.starved_s, 0.0)
+        before = self.timelines[-1]["target"]
+        feed.stalled = True
+        feed.run(3.0)  # VLC runs dry
+        feed.stalled = False
+        feed.run(5.0)
+        self.assertGreater(self.timelines[-1]["target"], before + 1.0)
+        self.assertTrue(self.timelines[-1]["adjusted"])
+
+    def test_normal_is_unchanged_for_a_prefetch_source(self):
+        sid = self.tune("normal")
+        self.assertEqual(self.live._target(self.engine.snapshot(sid)), TARGETS["normal"])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["target"], 2.5)
+        self.assertFalse(self.live._stay.close)
+
+    def test_stable_on_a_prefetch_source_starts_about_six_seconds_back_and_targets_six(self):
+        # What the source's start brings (its 6 s target back from the prefetch pieces: from
+        # 8 s behind here): the start nearest 6 s plays at once (5.9 s once VLC opened it).
+        sid = self.start(latency="stable", channel="ch")
+        self.engine.buffer(
+            sid, segments(0, 4), live_edge=9.4, open_seq=4, hls=True, prefetching=True
+        )
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.live._target(self.engine.snapshot(sid)), 6.0)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 2))
+        self.assertEqual(self.notices, [])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["target"], 6.0)
+        self.assertFalse(self.live._stay.close)
+
+    def test_go_live_lands_within_the_low_target_band(self):
+        # Starts 6.65, 4.65, 2.65 and 0.65 s behind once VLC opened them (0.5 s): Low's 0.5 s
+        # on a prefetch source takes the newest (a quarter second short at most,
+        # `_BELOW_TARGET_S`; `_LAND_ABOVE_S` over); today's 1 s takes the one 2.65 s behind.
+        # So does Go live (the open measured at once: 0.35 s), at 0.5 s against 2.5 s.
+        for prefetching, first, again in ((True, 3, 5), (None, 2, 4)):
+            with self.subTest(prefetching=prefetching):
+                self.live = self.make()
+                sid = self.tune("low", prefetching=prefetching)
+                self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, first))
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.live.seek_to(1.0)
+                self.engine.buffer(
+                    sid,
+                    segments(0, 5),
+                    live_edge=10.15,
+                    open_seq=5,
+                    hls=True,
+                    prefetching=prefetching,
+                )
+                self.live.go_live()
+                self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, again))
+
+    def test_a_close_source_holds_its_target_through_its_piece_waits(self):
+        # Under Low: lands 1.3 s over the target (the newest keyframe 1.3 s back), takes it
+        # off at 1.05x within seconds, then holds half a second through the 0.3 s waits
+        # between pieces: no stall (the 2 s bound), no trouble, no hold, no other nudge.
+        sid = self.start(latency="low", channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        lags = self.lags(feed, 120.0)
+        self.assertEqual(max(self.playback.rates), 1.05)
+        self.assertEqual(changes(self.playback.rates), 2)  # one nudge, in and out
+        tail = lags[-240:]
+        self.assertLessEqual(sum(tail) / len(tail), 0.8)
+        self.assertGreaterEqual(min(tail), 0.25)
+        self.assertEqual(feed.starved_s, 0.0)
+        self.assertEqual(self.playback.holds, [])
+        self.assertFalse(any(state["stalled"] for state in self.timelines[-480:]))
+
+    def test_a_close_source_held_at_the_edge_plays_again_at_its_target(self):
+        # A hold (2.8.8: VLC ran dry within five minutes, then a silence) plays again once
+        # the target is ahead, not 2 s (four times Low's), which would then be caught up.
+        sid = self.start(latency="low", channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        feed.run(60.0)
+        feed.stalled = True
+        feed.run(2.0)  # VLC runs dry (unheld: once is a hiccup)
+        feed.stalled = False
+        feed.run(30.0)
+        self.assertEqual(self.playback.holds, [])
+        feed.stalled = True
+        feed.run(2.0)  # the next silence is held
+        feed.stalled = False
+        self.assertEqual(self.playback.holds, [True])
+        while self.playback.held:
+            feed.run(Feed.DT)
+        state = self.timelines[-1]
+        self.assertLess(state["live_edge"] - state["position"], 1.0)  # not 2 s
+
+    def test_a_source_without_prefetch_keeps_todays_targets(self):
+        for latency in ("low", "normal", "stable", AUTO):
+            for prefetching in (None, False):
+                with self.subTest(latency=latency, prefetching=prefetching):
+                    self.live = self.make()
+                    sid = self.tune(latency, prefetching=prefetching)
+                    expected = TARGETS["normal" if latency == AUTO else latency]
+                    snapshot = self.engine.snapshot(sid)
+                    self.assertEqual(self.live._target(snapshot), expected)
+                    self.playback.set_state(PlaybackState.PLAYING)
+                    self.step(0.25)
+                    self.assertEqual(self.timelines[-1]["target"], expected)
+                    self.assertFalse(self.live._stay.close)
+                    if latency == AUTO:
+                        learned = self.live._learned
+                        self.assertEqual(learned.floor, learned_target.FLOOR_S)
+                        self.assertFalse(learned.arrivals.streaming)
+
+    def test_a_source_that_stops_listing_prefetch_pieces_has_todays_targets_again(self):
+        for latency, close, today in (("low", 0.5, 1.0), (AUTO, 1.0, 2.5)):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                sid = self.tune(latency)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.step(0.25)
+                self.assertAlmostEqual(self.timelines[-1]["target"], close)
+                self.engine.buffer(
+                    sid, segments(0, 3), live_edge=6.4, open_seq=3, hls=True, prefetching=False
+                )
+                self.step(0.25)
+                self.assertAlmostEqual(self.timelines[-1]["target"], today)
+                self.assertFalse(self.live._stay.close)
+
+    def test_auto_chosen_while_a_prefetch_source_plays_floors_at_one_second(self):
+        self.tune("normal")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.live.set_latency(AUTO)
+        self.step(0.25)
+        self.assertEqual(self.live._learned.floor, learned_target.PREFETCH_FLOOR_S)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0)

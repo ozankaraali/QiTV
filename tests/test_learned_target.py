@@ -1196,5 +1196,139 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertEqual(target.target(), 8.0)
 
 
+def streamed(until, piece=4.167, wait=0.2, seed=3):
+    """A live site's pieces read as they are made: media at real time in 20 ms blocks, the
+    edge standing still `wait` seconds (up to half as much again either way) where each
+    `piece` ends (the next piece's request), what was made meanwhile coming at once."""
+    rng = random.Random(seed)
+    pieces, t, edge = [], 0.0, 0.0
+    while t < until:
+        end = min(until, edge + piece)
+        while edge < end - 1e-9:
+            t += 0.02
+            edge += 0.02
+            pieces.append((t, 0.02))
+        held = wait * rng.uniform(0.5, 1.5)
+        t += held
+        edge += held
+        pieces.append((t, held))
+    return pieces
+
+
+def notified(until, wait=0.35, piece=4.167, seed=4):
+    """A live site's pieces as the helper reports them (Kick at 480p, 2026-11-25): media at real
+    time in lumps every 0.15-0.45 s (its state's own rhythm), the edge standing still `wait` s
+    (up to half as much again either way) where each `piece` ends, what was made meanwhile
+    coming at once. Its split batches came 1-1.5 s apart, its dips 0.3-0.46 s."""
+    rng = random.Random(seed)
+    pieces, t, edge, end = [], 0.0, 0.0, piece
+    while t < until:
+        step = rng.uniform(0.15, 0.45)
+        t += step
+        edge += step
+        pieces.append((t, step))
+        if edge >= end:
+            held = wait * rng.uniform(0.5, 1.5)
+            t += held
+            edge += held
+            pieces.append((t, held))
+            end += piece
+    return pieces
+
+
+class StreamingTests(unittest.TestCase):
+    """2026-11-25: under Auto a source that reads its playlist's prefetch pieces as they are
+    made (a live site's, `streams()`) plays about a second behind its edge: its floor is
+    `PREFETCH_FLOOR_S`; a flow at real time with the short waits between its pieces needs
+    no more than that (`PREFETCH_MARGIN_S`: a flow's split batches stand for half a second
+    of media it never waits for); and a near-miss is one closer than `PREFETCH_NEAR_S`, as
+    near for that floor as `NEAR_S` is for Normal's. Trouble raises it as on any source."""
+
+    def test_a_prefetch_source_under_auto_floors_at_one_second(self):
+        target = LearnedTarget()
+        target.streams()
+        self.assertEqual(target.floor, lt.PREFETCH_FLOOR_S)
+        self.assertEqual(target.target(), 1.0)  # no trouble, nothing measured: the floor
+        Source(target.arrivals).run(streamed(600), 600)
+        self.assertTrue(target.arrivals.warm)
+        self.assertAlmostEqual(target.target(), 1.0, delta=0.05)  # measured: still about it
+        before = target.target()
+        target.starved()  # after a starvation it rises as today: log2(3) = 1.6 s of margin
+        self.assertAlmostEqual(target.target() - before, math.log2(3), delta=0.05)
+
+    def test_a_flow_as_the_helper_reports_it_needs_no_more_than_the_floor(self):
+        # Kick live (2026-11-25): split batches 1-1.5 s apart read 1.3-1.6 s as gaps; they are
+        # no waits. Streamed, its dips (the waits between pieces) are its need: the floor.
+        # Not streamed, as today: well above it.
+        for seed in SEEDS:
+            with self.subTest(seed=seed):
+                target = LearnedTarget()
+                target.streams()
+                Source(target.arrivals).run(notified(600, seed=seed), 600)
+                self.assertTrue(target.arrivals.warm)
+                self.assertLessEqual(target.target(), 1.1)  # about the floor: its dips' 0.5 s
+                model = ArrivalModel()
+                Source(model).run(notified(600, seed=seed), 600)
+                self.assertGreater(model.need(), 1.5)
+
+    def test_a_waiting_flow_still_needs_more(self):
+        # Waits of 0.8 s between pieces (and up to 1.2 s) are what the need is for.
+        target = LearnedTarget()
+        target.streams()
+        Source(target.arrivals).run(streamed(600, wait=0.8), 600)
+        self.assertGreater(target.target(), 1.5)
+
+    def test_a_near_miss_on_a_prefetch_source_is_a_closer_one(self):
+        for streams, headroom, counted in (
+            (True, 0.3, False),
+            (True, 0.1, True),
+            (False, 0.3, True),
+        ):
+            with self.subTest(streams=streams, headroom=headroom):
+                target = LearnedTarget()
+                if streams:
+                    target.streams()
+                Source(target.arrivals).run(regular(1.0, 1.0, 6.5), 6.5)
+                target.near_miss(headroom)
+                target.near_miss(headroom + 0.01)  # the same dip
+                self.assertEqual(target.prior.risk > 0.0, counted)
+
+    def test_a_source_that_no_longer_streams_has_todays_numbers_again(self):
+        target = LearnedTarget(Learned(need=6.0))
+        target.streams()
+        self.assertIsNone(target.arrivals.remembered)  # set aside for the tune (Task 2)
+        target.streams(False)
+        self.assertEqual(target.floor, lt.FLOOR_S)
+        self.assertEqual(target.target(), lt.FLOOR_S)
+        Source(target.arrivals).run(streamed(600), 600)
+        self.assertAlmostEqual(target.need(), 1.5, delta=0.1)  # a flow's need, as today
+
+    def test_a_source_without_prefetch_keeps_todays_targets(self):
+        # The same flow, never streamed: Normal's floor, the need's margin and near-misses
+        # as today.
+        target = LearnedTarget()
+        self.assertEqual(target.floor, lt.FLOOR_S)
+        Source(target.arrivals).run(streamed(600), 600)
+        self.assertAlmostEqual(target.need(), 1.5, delta=0.1)
+        self.assertEqual(target.target(), lt.FLOOR_S)
+        target.near_miss(0.3)
+        self.assertGreater(target.prior.risk, 0.0)
+
+    def test_what_a_prefetch_tune_learned_reads_back_with_its_floor(self):
+        # Kept with the floor it was learned under (the tuning file writes it when it is not
+        # Normal's, as 2.1 on read it): the next tune of the channel reads it sanely.
+        target = LearnedTarget()
+        target.streams()
+        Source(target.arrivals).run(streamed(600, wait=0.8), 600)
+        learned = target.learned()
+        self.assertIsNotNone(learned)
+        self.assertEqual(learned.floor, lt.PREFETCH_FLOOR_S)
+        self.assertTrue(learned.informative())
+        again = LearnedTarget(learned)  # built on Normal's floor before its first state
+        self.assertGreaterEqual(again.target(), lt.FLOOR_S)
+        again.streams()
+        self.assertEqual(again.target(), lt.PREFETCH_FLOOR_S)
+
+
 if __name__ == "__main__":
     unittest.main()

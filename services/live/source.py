@@ -142,8 +142,8 @@ _LAG_LOG_S = 10.0  # the lag line is logged at most this often
 # once and the rest at real time; a later copy lists the piece finished at the same address.
 _PREFETCH_TAGS = ("#EXT-X-PREFETCH:", "#EXT-X-TWITCH-PREFETCH:")
 # A session asking a live delay up to this (Low, Normal, Auto) starts at a playlist's first
-# prefetch piece; a longer one (Stable's 12 s: the cushion for jittery providers) as far back
-# as it would without them (ruling R4).
+# prefetch piece; a longer one (Stable's 12 s: the cushion for jittery providers) its target
+# back from them (2026-11-25; ruling R4 kept the depth it would have without them, 18 s on Kick).
 _PREFETCH_DELAY_MAX_S = 6.0
 # A playlist that lists prefetch pieces is read again this long after its last reload began
 # (not half a target duration: 3 s on Kick), should one bring no new piece: its pieces come as
@@ -2121,7 +2121,12 @@ class HlsSource:
         The end is the last finished piece's: a live site's prefetch pieces (`_with_prefetch`)
         are still being made. A live start under a live delay up to `_PREFETCH_DELAY_MAX_S`
         is the first of them: what it holds comes at once, the rest as it is made (Kick's
-        start three 6 s target durations back played 7.6 s behind the clock)."""
+        start three 6 s target durations back played 7.6 s behind the clock). Under a longer
+        one (Stable) the piece that begins the session's target before them (2026-11-25,
+        replacing ruling R4's depth: 18 s back on Kick where Stable aims at 6 s): the live edge
+        is in the first of them, so that start is at least the target behind it, and the
+        session picks its start at the target from what it brings, at once. A resumed run
+        still joins its earlier one as far back as the depth."""
         finished = playlist.segments[: _finished(playlist.segments)]
         if self._back is not None:
             segments, first = finished, playlist.media_sequence or 0
@@ -2136,8 +2141,11 @@ class HlsSource:
         if playlist.is_endlist:
             return 0
         depth = start = _back_from_end(finished, self._depth(playlist))
-        if len(finished) < len(playlist.segments) and self._live_delay <= _PREFETCH_DELAY_MAX_S:
-            start = len(finished)
+        if len(finished) < len(playlist.segments):
+            if self._live_delay <= _PREFETCH_DELAY_MAX_S:
+                start = len(finished)
+            elif self._target is not None:  # Stable: its target back, never past the depth
+                start = max(depth, _back_from_end(finished, self._target + max(0.0, self._extra)))
         after, self._after = self._after, None
         if after is not None:
             following = after + 1 - (playlist.media_sequence or 0)
@@ -3098,9 +3106,10 @@ def open_source(
     the session's ``target`` (and the ``extra`` it adds, Auto's), that target and one and a
     half segments more, and at least HOLD-BACK or three target durations
     (`HlsSource._depth`). A live site's playlist that lists its newest pieces while they are
-    made (prefetch pieces) starts at the first of them, read as it comes (but under a
-    ``live_delay`` over `_PREFETCH_DELAY_MAX_S`: Stable). After each batch of listed segments
-    it yields `CaughtUp`, and before a batch's first prefetch piece too.
+    made (prefetch pieces) starts at the first of them, read as it comes (under a
+    ``live_delay`` over `_PREFETCH_DELAY_MAX_S`, Stable, the ``target`` back from them). After
+    each batch of listed segments it yields `CaughtUp`, and before a batch's first prefetch
+    piece too.
     Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
 
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on

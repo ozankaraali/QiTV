@@ -1877,5 +1877,93 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(set(rates), {1.0})
 
 
+class CloseTests(unittest.TestCase):
+    """2026-11-25: a source that reads its pieces as they are made, held a second behind live
+    or less (a live site's prefetch pieces under Low's 0.5 s and Auto's 1 s floor: the
+    caller's `close`). Its dead band is `_CLOSE_BAND_S` either side, with no calm band; a
+    landing above it (the start a keyframe allowed, up to an interval further back) is taken
+    off within seconds at `_CLOSE_UP`, outside the budget; and too little room is under VLC's
+    caching (`_CLOSE_ROOM_S`). Otherwise it steers as any source."""
+
+    @staticmethod
+    def close(target):
+        stay = live(target)
+        stay.steady = stay.close = True
+        return stay
+
+    def test_a_lag_beyond_the_narrow_band_is_nudged_as_a_drift(self):
+        for target in (0.5, 1.0):
+            with self.subTest(target=target):
+                stay, clock = self.close(target), Clock()
+                _, rates = drive(stay, target + 0.25, 120.0, clock=clock)  # within it
+                self.assertEqual(set(rates), {1.0})
+                lag, rates = drive(stay, target + 0.5, 120.0, clock=clock)
+                self.assertEqual(max(rates), 1.03)
+                first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+                self.assertGreaterEqual(first * TICK, 14.75)  # a lasting drift: after 15 s
+                self.assertAlmostEqual(lag, target, delta=0.1)
+                # Not close: the band (and a steady source's calm band) leaves it so.
+                stay, clock = live(target), Clock()
+                stay.steady = True
+                _, rates = drive(stay, target + 0.5, 120.0, clock=clock)
+                self.assertEqual(set(rates), {1.0})
+
+    def test_a_landing_above_the_target_is_taken_off_within_seconds(self):
+        stay, clock = self.close(0.5), Clock()
+        stay.landed(1.6)  # the newest keyframe 2.1 s behind once VLC played it
+        lag, rates = drive(stay, 2.1, 60.0, clock=clock)
+        self.assertEqual(max(rates), stay_live._CLOSE_UP)
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertLessEqual(first * TICK, 3.25)  # after 3 s, not 15
+        self.assertEqual(changes(rates), 2)
+        self.assertAlmostEqual(lag, 0.5, delta=0.1)
+        # Outside the budget: a drift a minute on is nudged as ever, not tolerated.
+        lag, rates = drive(stay, lag + 0.6, 30.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)
+        # Not close: such a landing is nudged gently, after 15 s (LandingTests).
+        stay, clock = live(0.5), Clock()
+        stay.steady = True
+        stay.landed(1.6)
+        _, rates = drive(stay, 2.1, 10.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_a_landing_further_back_than_its_pick_said_is_the_landings_too(self):
+        # Seen live (2026-11-25, Kick under Auto): the pick said the target, VLC's first open
+        # took longer than its seed, and the lag read 1.9 s: the landing's all the same. Not
+        # while the stream that opened has not played (`hold_reopen`: its lag is not known),
+        # nor once VLC ran dry since the landing (that lag is the trouble's: a gentle nudge).
+        stay, clock = self.close(1.0), Clock()
+        stay.landed(0.0)
+        stay.hold_reopen = True
+        _, rates = drive(stay, 1.9, 5.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+        stay.hold_reopen = False
+        lag, rates = drive(stay, 1.9, 30.0, clock=clock)
+        self.assertEqual(rates[0], stay_live._CLOSE_UP)  # counted meanwhile: at once
+        self.assertAlmostEqual(lag, 1.0, delta=0.1)
+        stay, clock = self.close(1.0), Clock()
+        stay.landed(0.0)
+        stay.trouble()
+        _, rates = drive(stay, 1.9, 20.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)
+
+    def test_too_little_room_is_under_vlcs_caching(self):
+        stay, clock = self.close(0.5), Clock()
+        _, rates = drive(stay, 0.3, 60.0, clock=clock)  # 0.2 s short: within the band
+        self.assertEqual(set(rates), {1.0})
+        lag, rates = drive(stay, 0.15, 30.0, clock=clock)
+        self.assertEqual(min(rates), 0.95)  # urgent: VLC is about to run dry
+        self.assertAlmostEqual(lag, 0.5, delta=0.1)
+
+    def test_its_dead_band_is_the_narrow_one(self):
+        # What a jump's landing, a target's rise and trouble's cushion are judged by too.
+        stay = self.close(1.0)
+        self.assertEqual(stay.dead_band(), stay_live._CLOSE_BAND_S)
+        self.assertEqual(stay.calm(1), 0.0)
+        stay.close = False
+        self.assertEqual(stay.dead_band(), stay_live._BAND_S)
+        self.assertEqual(stay.calm(1), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
