@@ -111,7 +111,8 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(sl.update(S + 1e-6, False, now=clock.tick()), Decision(1.10))
         self.assertEqual(sl.update(S, True, now=clock.tick()), Decision(1.10))  # buffering
         self.assertIs(sl.mode, Mode.CATCHING_UP)
-        self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.5))  # no reopen
+        # no reopen; and once eased, never faster again (2.15)
+        self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.10))
         self.assertEqual(sl.update(S, False, now=clock.tick()), Decision(1.0))
         self.assertIs(sl.mode, Mode.LIVE)
 
