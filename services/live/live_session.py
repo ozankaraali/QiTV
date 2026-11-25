@@ -469,6 +469,18 @@ _PART_STEP_S = 6.0  # a part that broke off having brought less than this has no
 _RECORDING_MIN_S = 1.0
 _JOIN_SLACK_S = 1.0
 _HOLE_BACK_S = 2.0  # a seek into where it does not reach yet goes back this far before it
+# ... a part of it reads on this far past the buffer's start while it is listed, so its join
+# lies inside the buffer by that much (the buffer's start moves on as it evicts: 2.15 review),
+# and its stop follows the buffer's start once that moved this much
+_JOIN_INSIDE_S = 70.0
+_BACKFILL_MIN_S = 4.0  # a live playlist listing this much more than the buffer is fetched
+_BACKFILL_AHEAD_S = 600.0  # (all of it at once: it is never played on its own)
+# ... joined at the buffer's segment whose first picture follows the recording's last by its
+# timestamps when they run on one line (within this of a frame), and that segment lies within
+# this much of where the recording ends by its dates (Twitch's are its start, to the second)
+_PTS_MATCH_TICKS = 9_000
+_JOIN_PTS_S = 3.0
+_STOP_STEP_S = 2.0
 # ... and what is known of where it reaches grows with the clock past its longest step (Kick's
 # lists in steps of 30-60 s; Twitch's grows as it goes)
 _REACH_STEP_S = 60.0
@@ -698,6 +710,41 @@ class Borrowed:
     sid: str
     give_back: Callable[[], None]
     recording: Callable[[], bool] = field(default=lambda: False)
+
+
+def _part_end_pts(own: Sequence[Span]) -> Optional[int]:
+    """2.15: where a part's last segment ends by its timestamps (its first PTS on by its
+    length); None when not known."""
+    last = own[-1] if own else None
+    if last is None or last.first_pts is None:
+        return None
+    return (last.first_pts + round((last.end - last.start) * 90_000)) % (1 << 33)
+
+
+def _pts_step(a: int, b: int) -> int:
+    step = (b - a) % (1 << 33)
+    return step - (1 << 33) if step >= 1 << 32 else step
+
+
+def _by_timestamps(own: Sequence[Span], live: Sequence[Span]) -> Optional[Span]:
+    """2.15: the buffer's segment whose first picture comes right after a recording part's
+    last by their timestamps (the same encoder's line), or None (other lines)."""
+    end = _part_end_pts(own)
+    if end is None:
+        return None
+    found = [(abs(_pts_step(end, s.first_pts)), s) for s in live if s.first_pts is not None]
+    best = min(found, key=lambda pair: pair[0], default=None)
+    return best[1] if best is not None and best[0] <= _PTS_MATCH_TICKS else None
+
+
+def _pts_note(own: Sequence[Span], joined: Span) -> str:
+    """For the log: how the two lines' timestamps lie at the join (one line, or not)."""
+    end = _part_end_pts(own)
+    if end is None or joined.first_pts is None:
+        return ""
+    return ", its timestamps %+.3f s on from the recording's" % (
+        _pts_step(end, joined.first_pts) / 90_000
+    )
 
 
 class LiveSession(QObject):
@@ -967,6 +1014,7 @@ class LiveSession(QObject):
         # 2.15: the site's recording of the running broadcast (Kick, Twitch), while the channel
         # plays, and where a recording part's stream goes on into the buffer (timeline s)
         self._site_rec: Optional[RecordingRoute] = None
+        self._starts = 0  # tunes so far (2.15: a restart asks the site's recording afresh)
         self._join_at: Optional[float] = None
         self._site_reach: Optional[float] = None  # the Unix second its listing reaches, as known
         self._joined: Optional[tuple[str, int]] = None  # the join asked: (its part, the segment)
@@ -974,6 +1022,14 @@ class LiveSession(QObject):
         # as the stream's clock runs on from the part's end: the flip moves the position by it)
         self._join_shift = 0.0
         self._reach_at = 0.0  # when `_site_reach` was learned (Unix s: it grows from there)
+        self._stop_sent = 0.0  # the stop a recording part was given last (the buffer's start)
+        # 2.15 (Kick): what the live playlist still listed from before the buffer's start at
+        # the tune, fetched in the background (a server part never played on its own): the
+        # recording joins it where it ends, and it joins the buffer; its own join, as asked.
+        self._backfill: Optional[ServerPart] = None
+        self._bf_join: Optional[tuple[int, float, float]] = None  # (seq, shift, its end)
+        self._join_backfill = False  # the recording part joins the backfill, not the buffer
+        self._backfill_playing = False
         self._said_scheme: Optional[str] = None  # 2.7.1: the session whose scheme the log said
         self._from_kept = False
         self._disk_failures = 0  # of the kept buffer taken back, this tune: a second starts afresh
@@ -1098,6 +1154,7 @@ class LiveSession(QObject):
         stream the helper opens for it reads its sound and names its songs (`stream_title`)."""
         self.stop()
         self._site_rec = None  # (2.15: the new channel's is asked of its site as it plays)
+        self._starts += 1
         self._played, self._revive_on, self._once = False, revive, once
         self._failure = ("", None)
         self._revive.reset()
@@ -1244,6 +1301,7 @@ class LiveSession(QObject):
         self._caption_held, self._caption_armed = None, False
         self._end_recording()
         self._close_part(resume=False)
+        self._close_backfill()
         self._live_parked = False
         pending, self._kept = self._kept, None
         if pending is not None:
@@ -1618,6 +1676,11 @@ class LiveSession(QObject):
         """VLC plays the server part, before the buffer (2.7)."""
         return self._in_part
 
+    def starts(self) -> int:
+        """2.15: how many times it started a channel (each start forgets the site's recording:
+        a reopen asks it afresh)."""
+        return self._starts
+
     def set_site_recording(self, route: Optional[RecordingRoute]) -> None:
         """2.15: the channel's site keeps the running broadcast's recording (`route`; None:
         it keeps none): a rewind past the buffer plays it (the bar reaches the broadcast's
@@ -1629,6 +1692,7 @@ class LiveSession(QObject):
         self._reach_at = self._wall()
         if route is not None:
             _LOG.info("The site keeps the running broadcast: rewind reaches its start.")
+            self._open_backfill(route)
         if self._phase is _Phase.PIPELINE:
             self._emit_timeline()
 
@@ -1637,7 +1701,7 @@ class LiveSession(QObject):
         before the buffer) lands where something is: going back, just inside the recording's
         newest piece; going on, at the buffer's start. Nothing waits in that stretch."""
         reach = self._recording_reach(snapshot)
-        start = self._buffer_start(snapshot)
+        start = self._join_target()
         if reach is None or not reach <= t < start:
             return t
         return reach - _HOLE_BACK_S if t < self.position() else start
@@ -2214,6 +2278,7 @@ class LiveSession(QObject):
             self._lose_borrowed(LENT_ENDED)  # 2.9.7: another's is never opened anew
             return
         self._close_part(resume=False)  # `_begin` waits for its close too (`_unclosed`)
+        self._close_backfill()
         self._live_parked = self._part_resuming = self._resume_owed = False
         self._resume_held = None  # nothing parked is asked back: the new session is live
         sid, self._sid = self._sid, None
@@ -2314,6 +2379,7 @@ class LiveSession(QObject):
             self._refuse()
             return
         self._close_part(resume=False)  # 2.7: a server part goes with it
+        self._close_backfill()
         self._live_parked = False
         self._forget_retry()  # the helper's wait goes with its session
         phase = self._phase
@@ -2348,6 +2414,7 @@ class LiveSession(QObject):
         self._forget_retry()  # a refusal is never asked again
         self._end_recording()
         self._close_part(resume=False)
+        self._close_backfill()
         self._live_parked = False
         if phase is not _Phase.IDLE and self._phase is _Phase.IDLE:
             return  # its end's handler stopped the session meanwhile (one in the background)
@@ -2523,6 +2590,12 @@ class LiveSession(QObject):
         part = self._part
         if part is not None and sid == part.sid:
             self._on_part_updated(part, snapshot)
+            if part is self._backfill:
+                self._backfill_updated(part, snapshot)
+            return
+        backfill = self._backfill
+        if backfill is not None and sid == backfill.sid:
+            self._backfill_updated(backfill, snapshot)
             return
         if sid != self._sid:
             return
@@ -2909,6 +2982,12 @@ class LiveSession(QObject):
             self._direct_retries = 0
 
     def _on_ended(self, sid: str) -> None:
+        backfill = self._backfill
+        if backfill is not None and sid == backfill.sid:
+            backfill.ended = True
+            self._backfill_updated(backfill, self._engine.snapshot(sid))
+            if self._part is not backfill:
+                return
         if self._part is not None and sid == self._part.sid:
             self._part.ended = True  # 2.7: it reached the buffer (VLC's end hops)
             if self._part.recording:
@@ -3263,6 +3342,8 @@ class LiveSession(QObject):
                 self._emit_timeline()
                 return
         part = self._part
+        if part is not None and part.recording and not part.ended:
+            self._follow_stop(part)  # 2.15: the buffer's start may have moved on
         if self._part_playing and part is not None and part.recording:
             position = self._advance()
             joined = self._joined
@@ -3273,6 +3354,11 @@ class LiveSession(QObject):
                 if joined is None or joined[1] < 0:
                     self._hop(at=position)  # 2.15: no join was made: the buffer opens there
                     return
+                if self._join_backfill:
+                    # 2.15: on into what the channel listed before the buffer, nothing opened
+                    _LOG.info("The site's recording ran into what was listed before the buffer.")
+                    if self._play_backfill(position, shift=self._join_shift):
+                        return
                 # 2.15: the recording's stream went on into the buffer: one stream, playing on
                 # (VLC opens nothing); should it have ended there, its end opens the buffer.
                 _LOG.info("The site's recording ran into the buffer; playing on there.")
@@ -4596,7 +4682,7 @@ class LiveSession(QObject):
                 reach = start if position >= start else position - WINDOW_BAR_S
                 window_start = min(reach, position)
             reach_t = self._recording_reach(snapshot)
-            if reach_t is not None and reach_t < start - _RECORDING_MIN_S:
+            if reach_t is not None and reach_t < self._join_target() - _RECORDING_MIN_S:
                 # 2.15: where the site's recording reaches yet: past it, before the buffer, is
                 # not there yet (the bar shows a hole there, filled as the recording grows)
                 state["window_end"] = max(window_start, reach_t)
@@ -4612,8 +4698,11 @@ class LiveSession(QObject):
     # ---- 2.7: the server part ------------------------------------------------------------
     def _seek_part(self, t: float, *, lo: float = -math.inf, hi: float = math.inf) -> None:
         """A seek before the buffer: within what the server part holds, locally; else a
-        server part opens there."""
+        server part opens there. 2.15: within the backfill (what the channel listed before
+        the buffer), from it."""
         self._stay.user_seeked_back()
+        if self._part is not self._backfill and self._play_backfill(t):
+            return
         part = self._part
         if part is not None:
             placed = part.spans(self._engine.spans(part.sid))
@@ -4722,7 +4811,7 @@ class LiveSession(QObject):
         (`_on_part_updated`)."""
         snapshot = self._snapshot()
         begin = self._date_at(snapshot, t)
-        stop = self._date_at(snapshot, self._buffer_start(snapshot))
+        stop = self._date_at(snapshot, self._join_target())
         if begin is None or stop is None:
             self._part_failed()
             return
@@ -4730,6 +4819,7 @@ class LiveSession(QObject):
             "from_s": max(0.0, begin - route.start),
             "stop_s": max(0.0, stop - route.start),
             "stop_date": stop,
+            "late_s": _JOIN_INSIDE_S,
             "grows": True,
             "ahead_s": WINDOW_AHEAD_S,
         }
@@ -4738,6 +4828,7 @@ class LiveSession(QObject):
         sid = self._engine.open_session(route.url, **self._open_args, window=window)
         self._part = ServerPart(sid, t, None, recording=True)
         self._join_at = self._joined = None
+        self._stop_sent = stop
         self._part_tries += 1
         _LOG.info("Opening the site's recording %.0f s before the buffer.", -self._before(t))
 
@@ -4755,6 +4846,149 @@ class LiveSession(QObject):
             return
         part.offset = self._t_of_date(self._snapshot(), float(first))
 
+    # ---- 2.15: the backfill (Kick) ------------------------------------------------------
+    def _open_backfill(self, route: RecordingRoute) -> None:
+        """Kick's recording lags live by 10-70 s, in steps: right after a tune it may not reach
+        the buffer's start. What the live playlist still lists from before the buffer (about
+        28 s) is fetched now, in the background (a server part of the channel's own playlist,
+        never played on its own: the timed start waits for nothing), so the recording joins it
+        where it ends and it joins the buffer, by media sequence, as one stream."""
+        if (
+            not route.steps
+            or self._backfill is not None
+            or self._phase is not _Phase.PIPELINE
+            or self._sid is None
+            or self._one_stream
+            or self._borrowed is not None
+        ):
+            return
+        snapshot = self._snapshot()
+        live = self._engine.spans(self._sid)
+        until = buffer_first_media(live)
+        listed = _number(snapshot.get("window_s"))
+        held = self._live_edge(snapshot) - self._buffer_start(snapshot)
+        if until is None or listed <= held + _BACKFILL_MIN_S:
+            return
+        stop = next((span.start for span in live if span.media_seq == until), None)
+        window = {"back_s": listed, "until_seq": until, "ahead_s": _BACKFILL_AHEAD_S, "joins": True}
+        sid = self._engine.open_session(self._url, **self._open_args, window=window)
+        start = self._buffer_start(snapshot) - (listed - held)
+        self._backfill = ServerPart(sid, start, until, stop_t=stop, recording=True)
+        self._bf_join = None
+        _LOG.info("Fetching what the channel lists from before the buffer (%.0f s).", listed - held)
+
+    def _backfill_updated(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
+        """The backfill's state: placed flush against the buffer's segment beginning its stop
+        (as a server part); once whole, its stream's join into the buffer is asked."""
+        if part.offset is None and self._sid is not None:
+            wall = snapshot.get("part_wall")
+            media = snapshot.get("part_media_s")
+            live = self._snapshot()
+            part.place(
+                float(wall) if isinstance(wall, (int, float)) else self._wall(),
+                live_parts.from_state(live.get("parts")),
+                live_edge=self._live_edge(live),
+                now=self._wall(),
+                media_before=float(media) if isinstance(media, (int, float)) else None,
+                live=self._engine.spans(self._sid),
+            )
+        if not part.ended or self._bf_join is not None or part.offset is None or not self._sid:
+            return
+        end = part.offset + _number(snapshot.get("end"))
+        joined = next((s for s in self._engine.spans(self._sid) if s.media_seq == part.until), None)
+        if joined is not None:
+            self._bf_join = (joined.seq, joined.start - end, end)
+            self._engine.join(part.sid, self._sid, joined.seq)
+            _LOG.info(
+                "What the channel listed before the buffer joins it (%.2f s).", joined.start - end
+            )
+
+    def _backfill_start(self) -> Optional[float]:
+        """Where the backfill begins on the timeline once it is whole, placed and joined to
+        the buffer (None before, or without one)."""
+        part = self._backfill
+        if part is None or not part.ended or part.offset is None or self._bf_join is None:
+            return None
+        own = self._engine.spans(part.sid)
+        return part.offset + own[0].start if own else None
+
+    def _close_backfill(self) -> None:
+        part, self._backfill, self._bf_join = self._backfill, None, None
+        self._backfill_playing = False
+        if part is not None:
+            if self._part is part:
+                self._part = None
+                self._in_part = self._part_playing = False
+            self._close(part.sid)
+
+    def _play_backfill(self, t: float, *, shift: Optional[float] = None) -> bool:
+        """Play the backfill from where it holds `t` (a seek there); with `shift` (a
+        recording part's stream just went on into it, by that much), on with nothing opened.
+        False: it holds nothing there."""
+        part = self._backfill
+        if part is None or self._bf_join is None or part.offset is None:
+            return False
+        placed = part.spans(self._engine.spans(part.sid))
+        holding = [span for span in placed if span.start <= t]
+        if not placed or t >= placed[-1].end or (shift is None and not holding):
+            return False
+        recording = self._part
+        if shift is not None:
+            self._base += shift  # (the picture is at that segment's start)
+            self._part = None
+            if recording is not None and recording is not part:
+                self._close(recording.sid)  # (its stream went on in the backfill's)
+        else:
+            self._close_part(resume=False, replacing=True)
+        self._part = part
+        self._part_ready = self._in_part = self._part_playing = self._backfill_playing = True
+        seq, join_shift, end = self._bf_join
+        self._join_at, self._joined, self._join_shift = end, (part.sid, seq), join_shift
+        self._join_backfill = False
+        if shift is None:
+            self._open_at((holding[-1] if holding else placed[0]).seq, part)
+        return True
+
+    def _join_target(self) -> float:
+        """2.15: where a recording part's input stops, on the timeline: the backfill's start
+        once it is there (it fills what the recording does not reach yet), else the buffer's."""
+        start = self._backfill_start()
+        return start if start is not None else self._buffer_start()
+
+    def _arm_backfill_join(self, part: ServerPart, backfill: ServerPart, end: float) -> None:
+        """2.15: a recording part ending before the buffer joins the backfill's segment that
+        begins where it ends (its timestamps', else the nearest by date)."""
+        own = self._engine.spans(backfill.sid)
+        placed = backfill.spans(own)
+        nearest = min(placed, key=lambda span: abs(span.start - end), default=None)
+        by_pts = _by_timestamps(self._engine.spans(part.sid), own)
+        if by_pts is not None:
+            nearest = next((s for s in placed if s.seq == by_pts.seq), nearest)
+        if nearest is None or abs(nearest.start - end) > _JOIN_SLACK_S:
+            return
+        if self._joined == (part.sid, nearest.seq):
+            return
+        self._joined, self._join_shift = (part.sid, nearest.seq), nearest.start - end
+        self._join_backfill = True
+        self._engine.join(part.sid, backfill.sid, nearest.seq)
+        _LOG.info(
+            "The site's recording joins what the channel listed before the buffer (%.2f s).",
+            nearest.start - end,
+        )
+
+    def _follow_stop(self, part: ServerPart) -> None:
+        """2.15 (review): a recording part's stop follows the buffer's start as the buffer
+        evicts (as a server part's `set_until`), so its join never lands where the buffer let
+        go of its segment."""
+        route = self._site_rec
+        if route is None or self._sid is None:
+            return
+        stop = self._date_at(self._snapshot(), self._join_target())
+        if stop is None or abs(stop - self._stop_sent) < _STOP_STEP_S:
+            return
+        self._stop_sent = stop
+        self._engine.set_stop(part.sid, stop, max(0.0, stop - route.start))
+
     def _arm_join(self, part: ServerPart) -> None:
         """2.15: a recording part's input reached its stop: its viewer's stream goes on into
         the buffer's segment that begins where it ends (the stream server's join), and the
@@ -4762,15 +4996,29 @@ class LiveSession(QObject):
         yet (live, Twitch: its last piece ended 9 s past the buffer's start, 2 s after the
         tune), it is asked again as the buffer grows (`_tick`); without a segment beginning that
         near, the buffer opens there as the picture reaches it."""
-        if part.offset is None or part.failed or self._sid is None:
-            return
+        if part.offset is None or part.failed or self._sid is None or part is self._backfill:
+            return  # (the backfill's own join is asked as it ends: `_backfill_updated`)
         end = part.offset + _number(self._engine.snapshot(part.sid).get("end"))
         self._join_at = end
+        backfill = self._backfill
+        if (
+            part is not backfill
+            and backfill is not None
+            and self._backfill_start() is not None
+            and end < self._buffer_start() - _JOIN_SLACK_S
+        ):
+            self._arm_backfill_join(part, backfill, end)
+            return
         spans = self._engine.spans(self._sid)
         nearest = min(spans, key=lambda span: abs(span.start - end), default=None)
-        if nearest is None or abs(nearest.start - end) > _JOIN_SLACK_S:
+        by_pts = _by_timestamps(self._engine.spans(part.sid), spans)
+        if by_pts is not None and abs(by_pts.start - end) <= _JOIN_PTS_S:
+            nearest = by_pts  # 2.15: the same encoder's timestamps: the picture that follows
+        slack = _JOIN_PTS_S if nearest is not None and nearest is by_pts else _JOIN_SLACK_S
+        if nearest is None or abs(nearest.start - end) > slack:
             if spans and spans[-1].end > end + _JOIN_SLACK_S and self._joined is None:
                 self._joined = (part.sid, -1)  # none there: never asked again
+                self._engine.join(part.sid, "", -1)  # (its stream ends there at once)
                 _LOG.info("The site's recording ends where the buffer has no segment beginning.")
             return
         if self._joined == (part.sid, nearest.seq):
@@ -4779,7 +5027,13 @@ class LiveSession(QObject):
         self._join_shift = nearest.start - end
         self._engine.join(part.sid, self._sid, nearest.seq)
         _LOG.info(
-            "The site's recording joins the buffer (%.2f s from its end).", nearest.start - end
+            "The site's recording joins the buffer (%.2f s from its end%s).",
+            nearest.start - end,
+            (
+                ", by their timestamps"
+                if nearest is by_pts
+                else _pts_note(self._engine.spans(part.sid), nearest)
+            ),
         )
 
     def _before(self, t: float) -> float:
@@ -4941,6 +5195,9 @@ class LiveSession(QObject):
         opens), a provider archive's route goes with it."""
         part, self._part = self._part, None
         self._join_at = self._joined = None
+        self._join_backfill = False
+        if part is not None and part is self._backfill:
+            part, self._backfill_playing = None, False  # (it stays: `_close_backfill`)
         if not replacing:
             self._archive = None
         self._part_ready = self._in_part = self._part_playing = False

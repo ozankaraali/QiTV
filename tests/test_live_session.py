@@ -97,6 +97,7 @@ class FakeEngine(QObject):
         self.junctions = []  # (sid, seconds): what a session's next restart is asked (2.8.5)
         self.retry_nows = []  # sids asked to try their channel's stream again now
         self.joins = []  # (part sid, live sid, seq): a recording part's stream goes on (2.15)
+        self.stops = []  # (part sid, stop date, stop place): its stop moved (2.15)
         self.events = []  # ("open", sid) as sessions open
         self._answered = set()
         self._spans = {}
@@ -155,6 +156,9 @@ class FakeEngine(QObject):
 
     def join(self, sid, live_sid, seq):
         self.joins.append((sid, live_sid, seq))  # 2.15
+
+    def set_stop(self, sid, stop_date, stop_s):
+        self.stops.append((sid, stop_date, stop_s))  # 2.15: a recording part's stop moved
 
     def start_recording(self, sid, path, seq, **kwargs):
         rid = f"r{len(self.recordings) + 1}"
@@ -8713,6 +8717,7 @@ class SiteRecordingTests(LiveSessionCase):
                 "from_s": 1_800.0,
                 "stop_s": 3_600.0,
                 "stop_date": 10_000.0,
+                "late_s": 70.0,
                 "grows": True,
                 "ahead_s": WINDOW_AHEAD_S,
                 "reload_s": 30.0,
@@ -8772,7 +8777,7 @@ class SiteRecordingTests(LiveSessionCase):
         own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 23.0, False, media_seq=360)]
         part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
         self.engine.sessionEnded.emit(part)  # it ends at 3.0: no buffer segment begins there
-        self.assertEqual(self.engine.joins, [])
+        self.assertEqual(self.engine.joins, [(part, "", -1)])  # (its stream ends there at once)
         self.playback.set_state(PlaybackState.PLAYING)
         self.playback.ended.emit()  # VLC read it to its end
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
@@ -8872,6 +8877,126 @@ class SiteRecordingTests(LiveSessionCase):
         self.engine.buffer(sid, self.SPANS[:10], hls=True, dates=[[0.0, 10_000.0]])
         self.live._tick()
         self.assertEqual(self.engine.joins, [(part, sid, 5)])  # its segment at 10.0, once there
+
+    def test_a_recording_parts_stop_follows_the_buffers_start_as_it_evicts(self):
+        # Review (2026-11-25): a rewind an hour back played on while the buffer evicted; the
+        # part reached its old stop, where the buffer no longer had a segment: a reopen.
+        sid = self.playing()
+        self.live.seek_to(-1_800.0)
+        part = self.engine.opened[-1][0]
+        self.live._tick()
+        self.assertEqual(self.engine.stops, [])  # the buffer's start has not moved
+        self.engine.buffer(sid, self.SPANS[10:], hls=True, dates=[[0.0, 10_000.0]])
+        self.live._tick()
+        self.assertEqual(self.engine.stops, [(part, 10_020.0, 3_620.0)])
+        self.live._tick()
+        self.assertEqual(len(self.engine.stops), 1)  # once per move
+
+    def test_the_join_follows_the_timestamps_when_both_run_on_one_line(self):
+        # Brief 2, 7: Twitch placed by its start (to the second) joined 0.82 s off; where the
+        # recording's and the buffer's timestamps run on one line, the picture that follows.
+        spans = [
+            Span(
+                n,
+                2.0 * n,
+                2.0 * n + 2.0,
+                False,
+                media_seq=500 + n,
+                first_pts=9_000_000 + n * 180_000,
+            )
+            for n in range(100)
+        ]
+        sid = self.playing(spans=spans)
+        own = [
+            Span(0, 0.0, 10.0, False, media_seq=359, first_pts=7_299_000),
+            Span(1, 10.0, 20.9, False, media_seq=360, first_pts=8_199_000),
+        ]
+        part = self.in_recording(-15.0, own, part_date=9_980.0)
+        self.engine.sessionEnded.emit(part)  # it ends at 0.9 by its date; at 2.0 by its PTS
+        self.assertEqual(self.engine.joins, [(part, sid, 1)])
+
+    def short_buffer_with_backfill(self):
+        """8 s buffered (from media sequence 500), the live playlist listing 28 s: the site's
+        recording known, its backfill (20 s, 490-499) fetched whole and joined to the buffer."""
+        sid = self.playing(spans=self.SPANS[:4])
+        self.engine.buffer(
+            sid, self.SPANS[:4], hls=True, window=28.0, parts=[[0, 0.0, 10_000.0]],
+            dates=[[0.0, 10_000.0]],
+        )  # fmt: skip
+        self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=True, steps=True))
+        backfill, url, kwargs = self.engine.opened[-1]
+        self.assertEqual(url, URL)  # the channel's own playlist
+        self.assertEqual(
+            kwargs["window"],
+            {"back_s": 28.0, "until_seq": 500, "ahead_s": 600.0, "joins": True},
+        )
+        own = [Span(n, 2.0 * n, 2.0 * n + 2.0, False, media_seq=490 + n) for n in range(10)]
+        self.engine.buffer(backfill, own, hls=True, part_media=20.0, part_wall=9_980.0)
+        self.engine.sessionEnded.emit(backfill)
+        self.assertEqual(self.engine.joins, [(backfill, sid, 0)])
+        return sid, backfill
+
+    def test_right_after_a_tune_the_recording_joins_the_backfill_which_joins_the_buffer(self):
+        # Brief 2, 8: what the channel still listed before the buffer is fetched at once in
+        # the background; a rewind's recording ends where it begins and joins it, then on into
+        # the buffer: one stream, nothing opened at either join.
+        sid, backfill = self.short_buffer_with_backfill()
+        self.live.seek_to(-45.0)
+        part, url, kwargs = self.engine.opened[-1]
+        self.assertEqual((url, kwargs["window"]["stop_date"]), (self.URL, 9_980.0))
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=354 + n) for n in range(3)]
+        self.engine.buffer(part, own, hls=True, part_date=9_950.0)
+        self.engine.sessionReady.emit(part)
+        self.engine.sessionEnded.emit(part)  # it ends at -20: where the backfill begins
+        self.assertIn((part, backfill, 0), self.engine.joins)
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.advance(16.0)  # -50 + 16: into the backfill
+        self.assertTrue(self.live.in_server_part())
+        self.assertAlmostEqual(self.live.position(), -34.0, delta=0.01)
+        self.advance(20.0)  # past -20, the recording's end
+        self.assertTrue(self.live.in_server_part())  # in the backfill now
+        self.advance(20.0)  # past 0, the buffer's start
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(len(self.playback.plays), plays)  # nothing opened at either join
+        self.assertIn(part, self.engine.closed)  # the recording's part went; the backfill stays
+        self.assertNotIn(backfill, self.engine.closed)
+        self.live.seek_to(-10.0)  # back into the backfill: from it
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(backfill, 5))
+
+    def test_at_where_the_recording_does_not_reach_yet_play_waits_and_goes_on(self):
+        # Brief 2, 8: at 1x and at 2x, play into the stretch the recording does not list yet
+        # waits there (buffering), never jumps and never reopens; it goes on as it grows.
+        for rate in (1.0, 2.0):
+            with self.subTest(rate=rate):
+                self.live = self.make()
+                self.playing()
+                self.live.seek_to(-30.0)
+                part = self.engine.opened[-1][0]
+                own = [
+                    Span(0, 0.0, 10.0, False, media_seq=357),
+                    Span(1, 10.0, 20.0, False, media_seq=358),
+                ]
+                self.engine.buffer(part, own, hls=True, part_date=9_965.0)  # it lists to -15
+                self.engine.sessionReady.emit(part)
+                self.playback.set_state(PlaybackState.PLAYING)
+                if rate != 1.0:
+                    self.live.set_speed(rate)
+                self.advance(19.0 / rate)  # to -16, near its listing's end
+                plays, opens = len(self.playback.plays), len(self.engine.opened)
+                for _ in range(120):  # 30 s there: VLC waits, its time standing
+                    self.clock.now += 0.25
+                    self.live._tick()
+                self.assertEqual(
+                    (len(self.playback.plays), len(self.engine.opened)), (plays, opens)
+                )
+                self.assertTrue(self.live.in_server_part())
+                self.assertEqual(self.live._rate, rate)
+                more = own + [Span(2, 20.0, 30.0, False, media_seq=359)]
+                self.engine.buffer(part, more, hls=True, part_date=9_965.0)  # it grew
+                before = self.live.position()
+                self.advance(2.0)
+                self.assertGreater(self.live.position(), before)
 
     def test_go_live_leaves_the_recording_and_a_new_tune_forgets_it(self):
         sid = self.playing()

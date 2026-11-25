@@ -175,7 +175,8 @@ class StreamServer:
 
     def join(self, session_id: str, other_id: str, seq: int) -> None:
         """2.15: the viewer's response of session `session_id` (added with `joins`) goes on,
-        once its ring ends, into session `other_id`'s from segment `seq`."""
+        once its ring ends, into session `other_id`'s from segment `seq`; `other_id` "": it
+        joins none (its response ends at its ring's end at once, no join waited for)."""
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or not session.joins:
@@ -192,12 +193,18 @@ class StreamServer:
             if join is None or other is None or other.removed or self._stopping:
                 return None
             ours, theirs = session.program(), other.program()
-            if ours != theirs or ours[0] is None:
+            if ours[1] != theirs[1] or ours[0] is None or theirs[0] is None:
                 _LOG.info("A recording's stream does not join the buffer: its video differs.")
-                return None
+                return None  # (another kind of video; its PIDs alone are mapped: `_PidMap`)
             session.clients.discard(client)
             other.clients.add(client)
             return other, join[1]
+
+    def _move_back(self, other: _Session, session: _Session, client: socket.socket) -> None:
+        """A join that is not made after all: the client is the session's again."""
+        with self._lock:
+            other.clients.discard(client)
+            session.clients.add(client)
 
     def remove_session(self, session_id: str) -> None:
         with self._lock:
@@ -275,6 +282,104 @@ class StreamServer:
     def _detach(self, session: _Session, client: socket.socket) -> None:
         with self._lock:
             session.clients.discard(client)
+
+
+_PACKET = 188
+# Picture and sound stream types a join maps (H.264, HEVC, MPEG-2 video; AAC, MP3, AC-3, E-AC-3,
+# LATM): a stream of any other (a site's timed metadata) is left out of the joined stream
+_AV_TYPES = frozenset({0x1B, 0x24, 0x02, 0x10, 0x0F, 0x11, 0x03, 0x04, 0x81, 0x87})
+
+
+def _program_tables(data: bytes) -> tuple[int, int, list[tuple[int, int]]] | None:
+    """2.15: a stream's PMT PID, PCR PID and its streams ((stream type, PID) in order), read
+    from its first bytes (a segment's tables); None when they are not there whole."""
+    pmt_pid: int | None = None
+    for at in range(0, len(data) - _PACKET + 1, _PACKET):
+        packet = data[at : at + _PACKET]
+        if packet[0] != 0x47 or not packet[1] & 0x40:
+            continue
+        pid = ((packet[1] & 0x1F) << 8) | packet[2]
+        start = 4 + (1 + packet[4] if packet[3] & 0x20 else 0)
+        if start >= _PACKET:
+            continue
+        section = packet[start + 1 + packet[start] :]
+        if pid == 0 and pmt_pid is None and len(section) >= 12 and section[0] == 0x00:
+            length = ((section[1] & 0x0F) << 8) | section[2]
+            for i in range(8, min(3 + length - 4, len(section) - 3), 4):
+                if (section[i] << 8) | section[i + 1]:
+                    pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
+                    break
+        elif pid == pmt_pid and len(section) >= 12 and section[0] == 0x02:
+            length = ((section[1] & 0x0F) << 8) | section[2]
+            end = min(3 + length - 4, len(section))
+            pcr = ((section[8] & 0x1F) << 8) | section[9]
+            i = 12 + (((section[10] & 0x0F) << 8) | section[11])
+            streams = []
+            while i + 5 <= end:
+                streams.append((section[i], ((section[i + 1] & 0x1F) << 8) | section[i + 2]))
+                i += 5 + (((section[i + 3] & 0x0F) << 8) | section[i + 4])
+            return pmt_pid, pcr, streams
+    return None
+
+
+class _PidMap:
+    """2.15: the live buffer's packets under the recording's PIDs (Twitch's recording is
+    remuxed from fMP4, a TS live stream keeps its own PIDs): each stream to the recording's
+    stream of its place and type, its PAT and PMT the recording's own; packets passed whole
+    (a chunk may end inside one). `of(ours, theirs)`: None when the two programs' streams do
+    not match one to one, or need no mapping."""
+
+    @classmethod
+    def of(cls, ours: bytes, theirs: bytes) -> "_PidMap | None | bool":
+        """A map of `theirs`' PIDs onto `ours` (each a stream's first bytes); True: the same
+        PIDs already; None: no map can be made."""
+        mine, other = _program_tables(ours), _program_tables(theirs)
+        if mine is None or other is None:
+            return None
+        if mine == other:
+            return True
+        ours_av = [(t, pid) for t, pid in mine[2] if t in _AV_TYPES]
+        theirs_av = [(t, pid) for t, pid in other[2] if t in _AV_TYPES]
+        if not ours_av or [t for t, _ in ours_av] != [t for t, _ in theirs_av]:
+            return None
+        pids = {pid: to for (_, pid), (_, to) in zip(theirs_av, ours_av)}
+        pids.setdefault(other[1], mine[1])
+        # (their other streams' packets are left out: our tables do not name them)
+        dropped = {pid for t, pid in other[2] if t not in _AV_TYPES} - set(pids)
+        tables: dict[int, bytes] = {}
+        for at in range(0, len(ours) - _PACKET + 1, _PACKET):
+            pid = ((ours[at + 1] & 0x1F) << 8) | ours[at + 2]
+            if pid in (0, mine[0]) and ours[at + 1] & 0x40 and pid not in tables:
+                tables[0 if pid == 0 else other[0]] = ours[at : at + _PACKET]
+        if len(tables) < 2:
+            return None
+        return cls(pids, tables, dropped)
+
+    def __init__(self, pids: dict[int, int], tables: dict[int, bytes], dropped: set[int]) -> None:
+        self._pids, self._tables, self._dropped = pids, tables, dropped
+        self._rest = b""
+
+    def feed(self, data: bytes) -> bytes:
+        data = self._rest + data
+        whole = len(data) - len(data) % _PACKET
+        self._rest = data[whole:]
+        out = bytearray()
+        for at in range(0, whole, _PACKET):
+            packet = data[at : at + _PACKET]
+            pid = ((packet[1] & 0x1F) << 8) | packet[2]
+            table = self._tables.get(pid)
+            if table is not None:
+                if packet[1] & 0x40:  # a table's first packet: ours, under our PID
+                    out += table
+                continue
+            if pid in self._dropped:
+                continue
+            to = self._pids.get(pid)
+            if to is None:
+                out += packet
+                continue
+            out += packet[:1] + bytes([(packet[1] & 0xE0) | (to >> 8), to & 0xFF]) + packet[3:]
+        return bytes(out)
 
 
 class _HTTPServer(ThreadingLoopbackHTTPServer):
@@ -363,8 +468,10 @@ class _Handler(BaseHTTPRequestHandler):
         joiner: ClockJoiner | None = None
         junction = False
         current = [session]
+        first = b""  # (2.15: its first bytes, its tables: a join maps the buffer's PIDs to them)
+        mapped: _PidMap | None = None
         if session.joins and not side:
-            joiner = ClockJoiner(program=lambda: current[0].program())
+            joiner = ClockJoiner(program=session.program)  # (its PIDs stay on: `_PidMap`)
         while not session.removed:
             # Before the read, so any later append, completion or eviction ends the wait.
             with ring.changed:
@@ -389,6 +496,10 @@ class _Handler(BaseHTTPRequestHandler):
                 if joiner is None:
                     self.wfile.write(data)
                 else:
+                    if len(first) < 4 * 1024:
+                        first += data[: 4 * 1024 - len(first)]
+                    if mapped is not None:
+                        data = mapped.feed(data)
                     for piece in joiner.feed(data, junction=junction):
                         self.wfile.write(piece)
                     junction = False
@@ -399,9 +510,10 @@ class _Handler(BaseHTTPRequestHandler):
                     if joiner is not None:
                         self._await_join(session)
                     if joiner is not None and session.join is not None:
-                        went = self._go_on(session, joiner, side)
+                        went = self._go_on(session, joiner, side, first)
                         if went is not None:
-                            session, number, turn = went
+                            session, number, turn, way = went
+                            mapped = way if isinstance(way, _PidMap) else mapped
                             current[0], ring, offset, junction = session, session.ring, 0, True
                             continue
                     return 0
@@ -421,9 +533,10 @@ class _Handler(BaseHTTPRequestHandler):
                 if ended and status == "timeout" and joiner is not None:
                     self._await_join(session)
                 if ended and status == "timeout" and joiner is not None and session.join:
-                    went = self._go_on(session, joiner, side)
+                    went = self._go_on(session, joiner, side, first)
                     if went is not None:
-                        session, number, turn = went
+                        session, number, turn, way = went
+                        mapped = way if isinstance(way, _PidMap) else mapped
                         current[0], ring, offset, junction = session, session.ring, 0, True
                         continue
                 return 0  # the next segment was evicted, the ring closed, or the session ended
@@ -442,15 +555,27 @@ class _Handler(BaseHTTPRequestHandler):
                 ring.changed.wait(min(0.05, max(0.0, deadline - time.monotonic())))
 
     def _go_on(
-        self, session: _Session, joiner: ClockJoiner, side: bool
-    ) -> tuple[_Session, int, int] | None:
+        self, session: _Session, joiner: ClockJoiner, side: bool, first: bytes
+    ) -> tuple[_Session, int, int, Any] | None:
         """2.15: a joining session's ring ended: the session it joins and its segment (with
-        that segment's tables: `offset` 0), the response reading as its viewer from now on;
-        None: it ends here."""
+        that segment's tables: `offset` 0), the response reading as its viewer from now on,
+        and how its PIDs map onto this stream's (`first`: its first bytes; True: the same);
+        None: it ends here (no join, or streams that do not match one to one)."""
         joined = self.server.owner._joined(session, self.connection)
         if joined is None:
             return None
         other, number = joined
+        try:
+            head = other.ring.read_at(number, 0, 4 * 1024)
+        except RingError:
+            head = None
+        way = _PidMap.of(first, head[0]) if head is not None else None
+        if way is None:
+            _LOG.info("A recording's stream does not join the buffer: its streams differ.")
+            self.server.owner._move_back(other, session, self.connection)
+            return None
+        if isinstance(way, _PidMap):
+            _LOG.info("A recording's stream goes on into the buffer under its own PIDs.")
         self._serving = other
         turn = 0
         if not side:
@@ -458,4 +583,4 @@ class _Handler(BaseHTTPRequestHandler):
             turn = other.reader
             other.reading = number
         _LOG.info("A recording's stream goes on into the buffer.")
-        return other, number, turn
+        return other, number, turn, way

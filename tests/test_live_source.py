@@ -3112,6 +3112,49 @@ video.m3u8
         self.assertEqual(requested_segments(server), ["r1.ts", "r2.ts", "r3.ts"])
         self.assertEqual(server.counts["/rec.m3u8"], 1)
 
+    def test_a_recording_part_reads_on_past_its_stop_while_listed_and_ends_at_its_listing(self):
+        # Review (2026-11-25): its join lies inside the buffer by `late_s` while the recording
+        # lists that far, so the buffer's start may move on; where it lists less, its listing's
+        # end past the stop is its last (no wait for more).
+        names = [f"r{n}.ts" for n in range(10)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/rec.m3u8"] = (200, {}, self.recording(names))
+        server = self.server(routes)
+        window = {"from_s": 0.0, "stop_s": 999.0, "stop_date": DAY.timestamp() + 25.0}
+        media(server.url + "/rec.m3u8", live_delay=1.0, window=dict(window, late_s=20.0))
+        self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(5)])  # to 50
+        short = {f"/r{n}.ts": (200, {}, self.video) for n in range(4)}
+        short["/rec.m3u8"] = (200, {}, self.recording([f"r{n}.ts" for n in range(4)]))
+        server = self.server(short)
+        window.update(late_s=70.0, grows=True, reload_s=30.0)
+        began = time.monotonic()
+        media(server.url + "/rec.m3u8", live_delay=1.0, window=window)
+        self.assertLess(time.monotonic() - began, 5.0)
+        self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(4)])
+
+    def test_a_recording_part_waiting_at_its_listings_end_reads_it_again_sooner(self):
+        # Brief 2, 8: once all it lists is fetched short of its stop, its listing is read again
+        # every 10 s (not Kick's 30 s step), one ask at a time.
+        def playlist(_request, count):
+            listed = 2 if count == 1 else 4
+            return 200, {}, self.recording([f"r{n}.ts" for n in range(listed)])
+
+        routes = {f"/r{n}.ts": (200, {}, self.video) for n in range(4)}
+        routes["/rec.m3u8"] = playlist
+        server = self.server(routes)
+        window = {
+            "from_s": 0.0,
+            "stop_s": 999.0,
+            "stop_date": DAY.timestamp() + 35.0,
+            "grows": True,
+            "reload_s": 30.0,
+        }
+        self.enterContext(patch.object(source_module, "_HOLE_RELOAD_S", 0.2))
+        began = time.monotonic()
+        media(server.url + "/rec.m3u8", live_delay=1.0, window=window)
+        self.assertLess(time.monotonic() - began, 5.0)
+        self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(4)])
+
     def test_a_growing_recording_goes_on_past_its_ended_listing_to_its_stop(self):
         # Kick's says ENDLIST while it grows in steps: read again, on to the stop.
         def playlist(_request, count):

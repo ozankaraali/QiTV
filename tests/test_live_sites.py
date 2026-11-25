@@ -577,6 +577,32 @@ class TwitchMediaTests(unittest.TestCase):
         self.assertEqual(parse_qs(parts.query), {"sig": [SIGNATURE], "token": [TOKEN]})
         self.assertEqual(resolved.name, "The goal · Twitch")
 
+    def test_a_clip_plays_its_tallest_quality_however_listed(self):
+        clip = {
+            "title": "x",
+            "playbackAccessToken": {"value": TOKEN, "signature": SIGNATURE},
+            "videoQualities": [
+                {"quality": "720", "frameRate": 60, "sourceURL": "https://c.invalid/720/index.mp4"},
+                {"quality": "1080", "frameRate": 30, "sourceURL": "https://c.invalid/1080a.mp4"},
+                {"quality": "1080", "frameRate": 59.94, "sourceURL": "https://c.invalid/1080.mp4"},
+            ],
+        }
+        source = self.serve({"clip(slug": {"clip": clip}})
+        url = self.resolve(source, ident="Slug", kind=CLIP).url
+        self.assertTrue(url.startswith("https://c.invalid/1080.mp4?"), url)
+
+    def test_a_recordings_listing_with_queried_pieces_is_never_kept(self):
+        # Review: a piece's address with a query may carry a token: never written to a file.
+        folder = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        source = self.serve(self.answers(status="RECORDING"))
+        master = VOD_MASTER.replace(b"https://cdn.example.invalid", source.url.encode())
+        source.routes["/vod/123.m3u8"] = (200, {}, master)
+        queried = RECORDING.replace(b"1.mp4", b"1.mp4?sig=x")
+        source.routes["/abc_examplechannel_1/1080p60/index-dvr.m3u8"] = (200, {}, queried)
+        resolved = self.resolve(source, keep_dir=folder)
+        self.assertTrue(resolved.url.startswith(source.url), resolved.url)
+        self.assertEqual(os.listdir(folder), [])
+
     def test_a_clip_nobody_has_is_gone(self):
         source = self.serve({"clip(slug": {"clip": None}})
         self.assertEqual(self.reason(source, ident="Slug", kind=CLIP), "unknown")

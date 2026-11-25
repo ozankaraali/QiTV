@@ -1554,9 +1554,16 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
             ("https://rec.example/1080p60/playlist.m3u8", 6_400.0, True, True),
         )
         self.assertEqual(asked, [(SitePage(KICK, "examplechannel"), False)])  # off the GUI
-        self.plays_now()  # it plays again (a reopen): asked once a tune
+        self.plays_now()  # it plays again, the same session's start: asked once
         pause(100)
         self.assertEqual(len(asked), 1)
+        # Review (2026-11-25): its stream reopened (a renewed token): the session started
+        # again and forgot the recording, so it is asked again once that plays.
+        self.live.start(MASTER)
+        self.live.play_pipeline()
+        self.plays_now()
+        self.assertTrue(wait_until(lambda: len(asked) == 2))
+        self.assertEqual(len(self.live.named("set_site_recording")), 2)
 
     def test_history_keeps_the_page_not_the_token(self):
         self.answers = [MASTER]

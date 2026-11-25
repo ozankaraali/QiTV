@@ -75,6 +75,8 @@ Commands (parent to helper):
   a stopped one may still be finishing. Answered by "recorded";
 - `("record_stop", sid)`: the session's recording ends at the live edge; an unknown sid, or
   one that records nothing, is ignored;
+- `("stop", sid, stop_date, stop_s)` (2.15): a recording part's stop moves (its live buffer's
+  start moved on).
 - `("join", part_sid, live_sid, seq)` (2.15): a recording part's viewer stream goes on, once
   its ring ends, into the live session's from segment `seq` (`StreamServer.join`), its clock
   re-based so it runs on.
@@ -198,7 +200,7 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 # seq, start, end, discontinuity, start_quality, media_seq (2.7: the HLS media sequence the
 # segment begins, or None)
-_Addition = tuple[int, float, float, bool, StartQuality, int | None]
+_Addition = tuple[int, float, float, bool, StartQuality, int | None, int | None]
 
 
 def _addition(span: Span) -> _Addition:
@@ -209,6 +211,7 @@ def _addition(span: Span) -> _Addition:
         span.discontinuity,
         span.start_quality,
         span.media_seq,
+        span.first_pts,  # (2.15: a recording's join by timestamps)
     )
 
 
@@ -1134,7 +1137,9 @@ class _Session:
 
                 reads = RecordedReads(ring, lambda: self._recorder)
                 window = self._start.get("window")
-                joins = isinstance(window, dict) and isinstance(window.get("from_s"), (int, float))
+                joins = isinstance(window, dict) and (
+                    isinstance(window.get("from_s"), (int, float)) or window.get("joins") is True
+                )
                 self._helper.server.add_session(
                     self.sid, reads, self._is_ended, program=self._program, joins=joins
                 )
@@ -1542,6 +1547,15 @@ class _Session:
             trimmer.extra = seconds
         else:
             self._junction = seconds
+
+    def set_stop(self, stop_date: float | None, stop_s: float | None) -> None:
+        """2.15: a recording part's stop moves (the live buffer's start moved on)."""
+        window = self._start.get("window")
+        if isinstance(window, dict):
+            window["stop_date"], window["stop_s"] = stop_date, stop_s
+        source = self._source
+        if source is not None and hasattr(source, "set_stop"):
+            source.set_stop(stop_date, stop_s)
 
     def set_until(self, seq: int) -> None:
         """A server part's stop moves to media sequence `seq` (2.7, "until")."""
@@ -2079,6 +2093,14 @@ class _Helper:
                 session = self._sessions.get(command[1])
                 if session is not None:
                     session.set_until(command[2])
+            elif name == "stop":  # 2.15: a recording part's stop moved (the buffer evicted)
+                if len(command) != 4 or not isinstance(command[1], str):
+                    raise ValueError("a stop needs a session and its places")
+                if not all(v is None or type(v) is float for v in command[2:]):
+                    raise ValueError("a stop's places are seconds")
+                session = self._sessions.get(command[1])
+                if session is not None:
+                    session.set_stop(command[2], command[3])
             elif name == "join":  # 2.15: a recording part's stream goes on into the buffer
                 if (
                     len(command) != 4
@@ -2086,7 +2108,7 @@ class _Helper:
                     or not isinstance(command[2], str)
                     or type(command[3]) is not int
                 ):
-                    raise ValueError("a join needs two sessions and a segment")
+                    raise ValueError("a join needs two sessions and a segment")  # ("", -1): none
                 self.server.join(command[1], command[2], command[3])
             elif name == "junction":  # 2.8.5: what stay-live asks the next restart to take
                 if (

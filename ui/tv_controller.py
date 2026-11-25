@@ -102,7 +102,7 @@ from services.jobs import JobRunner
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
-from services.live_sites import media_address, site_media, site_page
+from services.live_sites import forget_kept_listings, media_address, site_media, site_page
 from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.media_server import Quality
@@ -428,6 +428,8 @@ class TVController(QObject):
         self._jobs = jobs if jobs is not None else JobRunner(self)
         self._lanes.resolver = self._resolve_site
         self._site_stops: set[threading.Event] = set()
+        # 2.15: (the page, its kept listing's address) of a Twitch recording still being made
+        self._kept_listing: Optional[tuple[str, str]] = None
         self._tune_stop: Optional[threading.Event] = None
         self._asking_tune = False
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
@@ -1004,6 +1006,7 @@ class TVController(QObject):
             return
         self._closed = True
         self._lanes.close()
+        self._forget_kept_listings()  # 2.15: a recording's kept listing goes with QiTV
         self._live_controls.stop_waiting()  # a site's channel waited for is asked no more
         for stop in self._site_stops:
             stop.set()  # a site still asked answers no one: its ask ends
@@ -1390,6 +1393,8 @@ class TVController(QObject):
             self._site_asked(stop)
             address = getattr(answer, "url", answer)
             name = getattr(answer, "name", "")
+            if media is not None and str(address).startswith("file:"):
+                self._kept_listing = (url, str(address))  # (2.15: goes as its film closes)
             if media is not None and name and not self._closed:
                 self.linkNamed.emit(media_address(media), str(name))  # (2.15: its title)
             ok(str(address))
@@ -1398,7 +1403,7 @@ class TVController(QObject):
             self._site_asked(stop)
             failed(site_failure(str(reason), page))
 
-        self._jobs.run_worker(SiteJob(page, stop), answered, refused)
+        self._jobs.run_worker(SiteJob(page, stop, self._sites_dir()), answered, refused)
 
     def _reask_site(
         self, page: str, ok: Callable[[str], None], failed: Callable[[str], None]
@@ -1434,6 +1439,26 @@ class TVController(QObject):
 
         self._jobs.run_worker(RecordingJob(page, stop), answered, failed)
         return stop.set
+
+    def _sites_dir(self) -> Optional[str]:
+        """2.15: QiTV's own folder for a Twitch recording's kept listing (beside the config),
+        emptied as the film it plays closes (`_forget_kept_listings`)."""
+        folder = getattr(self.config, "get_config_dir", None)
+        return str(Path(folder()) / "cache" / "sites") if callable(folder) else None
+
+    def _forget_kept_listings(self, target: Optional[Target] = None) -> None:
+        """2.15: the kept listing of a recording still being made goes as its film closes
+        (another target replaces it, or QiTV closes; the same film played again keeps it), on
+        a plain thread (the disk)."""
+        kept = self._kept_listing
+        if kept is None or (target is not None and self._site_link(target.item) == kept[0]):
+            return
+        self._kept_listing = None
+        folder = self._sites_dir()
+        if folder is not None:
+            threading.Thread(
+                target=forget_kept_listings, args=(folder,), name="qitv-sites-clean", daemon=True
+            ).start()
 
     def _site_asked(self, stop: threading.Event) -> None:
         """A site's ask ended (answered, or not): nothing more stops it."""
@@ -4238,6 +4263,7 @@ class TVController(QObject):
         opens (CaptionsController.target_changing). The audio screen and its dock go too, but
         for a song after a song (no black page between two)."""
         self._sound_gives_way(target)
+        self._forget_kept_listings(target)  # 2.15: a recording's kept listing goes with its film
         if target is None or not target.local:
             self._list_job.stop()  # a list of songs given up: its songs stop being read
             if not delivered:

@@ -71,6 +71,8 @@ class Span:
     start_quality: StartQuality = START_KEY
     # 2.7: the HLS media sequence this segment begins (None: it begins none, or raw TS).
     media_seq: Optional[int] = None
+    # 2.15: its first picture's PTS as the ring holds it (None: not known; a kept buffer's)
+    first_pts: Optional[int] = None
 
 
 @dataclass
@@ -153,6 +155,7 @@ class Timeline:
             discontinuity,
             start_quality,
             opened.media_seq,
+            opened.first_pts,
         )
         self._spans.append(span)
         self._end = span.end

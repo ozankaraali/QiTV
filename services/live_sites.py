@@ -661,6 +661,12 @@ def _kept_listing(ident: str, url: str, text: str, keep_dir: str | None) -> str:
         raise SiteError("refused") from None
     if not playlist.segments:
         raise SiteError("refused")
+    uris = [segment.uri or "" for segment in playlist.segments]
+    uris += [s.init_section.uri or "" for s in playlist.segments if s.init_section is not None]
+    if any("?" in uri for uri in uris):
+        # (its pieces' addresses carry a query, maybe a token: never written to a file)
+        log.info("Twitch: a recording's listing is not kept (its pieces carry a query).")
+        return url
     for segment in playlist.segments:
         segment.uri = urljoin(url, segment.uri)
         init = segment.init_section
@@ -681,6 +687,21 @@ def _kept_listing(ident: str, url: str, text: str, keep_dir: str | None) -> str:
     return Path(path).as_uri()
 
 
+def forget_kept_listings(folder: str) -> None:
+    """2.15: the recordings' listings kept in `folder` go. Blocking: a worker's."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.endswith(".m3u8"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def _twitch_clip(
     slug: str, http: requests_types.Session, stop: threading.Event | None, gql: str
 ) -> tuple[str, str]:
@@ -697,16 +718,26 @@ def _twitch_clip(
     token = grant.get("value") if isinstance(grant, dict) else None
     signature = grant.get("signature") if isinstance(grant, dict) else None
     qualities = clip.get("videoQualities")
-    sources = [
-        q["sourceURL"]
+    listed = [
+        q
         for q in (qualities if isinstance(qualities, list) else [])
         if isinstance(q, dict) and isinstance(q.get("sourceURL"), str) and q["sourceURL"]
     ]
+
+    def rank(quality: dict) -> tuple[float, float]:  # the tallest, then the higher frame rate
+        height = re.match(r"\d+", str(quality.get("quality") or ""))
+        rate = quality.get("frameRate")
+        return (
+            float(height.group()) if height else 0.0,
+            round(float(rate)) if isinstance(rate, (int, float)) else 0.0,
+        )
+
+    sources = [q["sourceURL"] for q in sorted(listed, key=rank, reverse=True)]
     if not isinstance(token, str) or not isinstance(signature, str) or not token or not sources:
         log.warning("Twitch's answer changed: no clip to play.")
         raise SiteError("refused")
     query_text = urlencode({"sig": signature, "token": token}, quote_via=quote)
-    return f"{sources[0]}?{query_text}", _title(clip.get("title"))  # (best listed first)
+    return f"{sources[0]}?{query_text}", _title(clip.get("title"))
 
 
 def _kick_json(url: str, http: requests_types.Session, stop: threading.Event | None) -> dict:

@@ -135,6 +135,9 @@ _FROZEN_TIMEOUT = 60.0
 # 2.15: a site's recording of the running broadcast (a recording part) grows in steps (Kick:
 # 30-60 s): its listing stands still this long before it counts as frozen
 _RECORDING_FROZEN_S = 240.0
+# ... and once all it lists is fetched short of its stop (the picture heads for where it does
+# not reach yet), its listing is read again this often, one ask at a time
+_HOLE_RELOAD_S = 10.0
 # ... and its stop takes a piece that begins this little before it as at it (a date's rounding)
 _STOP_SLACK_S = 0.05
 # An older playlist copy that overlaps recent segments is waited out this many targets.
@@ -1880,6 +1883,10 @@ class HlsSource:
         self._from = _seconds(window.get("from_s")) if recording and window else None
         self._stop_s = _seconds(window.get("stop_s")) if recording and window else None
         self._stop_date = _seconds(window.get("stop_date")) if recording and window else None
+        # ... and how far past its stop it reads on while its listing goes on (2.15: its join
+        # then lies inside the buffer by that much, room for the buffer's start to move on)
+        self._late_s = _seconds(window.get("late_s")) if recording and window else None
+        self._listing_wait = 0.0  # 2.15: it waits at its listing's end (the reload's wait)
         self._grows = bool(window.get("grows")) if recording and window else False
         self._reload_s = _seconds(window.get("reload_s")) if recording and window else None
         self._part_start: float | None = None  # its first piece's place in its listing (s)
@@ -2237,22 +2244,33 @@ class HlsSource:
         self._part_date = _date_of(segments[index]) if index < len(segments) else None
         return index
 
-    def _reaches_stop(self, segment: Any, at: float) -> bool:
-        """A recording part's piece at place `at` that ends at or past its stop (2.15): its
-        last (the next is not waited for: it may not be listed yet, Kick's growing in steps)."""
-        length = float(segment.duration or 0)
+    def set_stop(self, stop_date: float | None, stop_s: float | None) -> None:
+        """2.15: a recording part's stop moves (the live buffer's start moved on: eviction);
+        any thread (one attribute each)."""
+        self._stop_date, self._stop_s = stop_date, stop_s
+
+    def _beyond(self, segment: Any, at: float, late: bool, end: bool) -> bool:
+        """Whether a recording part's piece at place `at` begins (`end`: ends) at or past its
+        stop, or (`late`) its stop and `late_s` more: by its date when it has one, else by
+        its place in the listing."""
+        more = (self._late_s or 0.0) if late else 0.0
+        length = float(segment.duration or 0) if end else 0.0
         dated = _date_of(segment)
         if dated is not None and self._stop_date is not None:
-            return dated + length >= self._stop_date - _STOP_SLACK_S
-        return self._stop_s is not None and at + length >= self._stop_s - _STOP_SLACK_S
+            return dated + length >= self._stop_date + more - _STOP_SLACK_S
+        return self._stop_s is not None and at + length >= self._stop_s + more - _STOP_SLACK_S
+
+    def _reaches_stop(self, segment: Any, at: float, last: bool = False) -> bool:
+        """A recording part's piece at place `at` is its last (2.15): it ends at or past its
+        stop and `late_s` more, or it is the last its listing lists and ends at or past its
+        stop (the next is never waited for there: Kick's lists in steps)."""
+        return self._beyond(segment, at, True, True) or (
+            last and self._beyond(segment, at, False, True)
+        )
 
     def _past_stop(self, segment: Any, at: float) -> bool:
-        """A recording part's piece that begins at or after its stop (2.15): by its date
-        when it has one, else by its place `at` in the listing."""
-        dated = _date_of(segment)
-        if dated is not None and self._stop_date is not None:
-            return dated >= self._stop_date - _STOP_SLACK_S
-        return self._stop_s is not None and at >= self._stop_s - _STOP_SLACK_S
+        """A recording part's piece that begins at or after its stop and `late_s` more."""
+        return self._beyond(segment, at, True, False)
 
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
@@ -2488,7 +2506,8 @@ class HlsSource:
                 self._serial += 1
                 self._sequence, self._dated = sequence, _date_of(segment)
                 yield from self._segment(segment, sequence, url)
-                if self._recording and self._reaches_stop(segment, at):
+                last = index == len(playlist.segments) - 1
+                if self._recording and self._reaches_stop(segment, at, last):
                     done = True  # 2.15: its last piece, the one reaching the buffer's start
                     break
             self._fetching = 0.0
@@ -2507,6 +2526,9 @@ class HlsSource:
                 interval = _PREFETCH_RELOAD_S
             elif self._recording and self._grows and self._reload_s:
                 interval = self._reload_s  # 2.15: Kick's recording grows in steps
+                if next_sequence is not None and next_sequence > newest:
+                    # all it lists is fetched short of its stop (the picture heads there): sooner
+                    interval = min(interval, _HOLE_RELOAD_S)
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
             loaded = time.monotonic()

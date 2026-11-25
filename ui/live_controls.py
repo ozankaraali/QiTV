@@ -293,7 +293,8 @@ class LiveControls(QObject):
         super().__init__(parent)
         self._waits_for_live = waits_for_live
         self._recording_of = recording_of
-        self._recording_asked: Optional[Target] = None  # the target asked for (once a tune)
+        # the ask made: (the target, its live session, that session's start count); once a start
+        self._recording_asked: Optional[tuple[Target, Any, int]] = None
         self._recording_stop: Callable[[], None] = lambda: None
         self._link = link
         self._link_failed = link_failed
@@ -506,6 +507,8 @@ class LiveControls(QObject):
         seconds = waiting() if callable(waiting) else None
         if seconds is not None:  # its stream was down, small: the pill says so large
             self._live_retrying(seconds, counted=False)
+        if self.session is not None and self._playing_now():
+            self._ask_recording()  # 2.15: the site's recording of the channel swapped in
 
     # ---- tuning -------------------------------------------------------------------------------
 
@@ -1182,26 +1185,32 @@ class LiveControls(QObject):
             self._hide_retry()
         self._ask_recording()
 
+    def _playing_now(self) -> bool:
+        state = getattr(self.session, "state", None)
+        return callable(state) and state() is PlaybackState.PLAYING
+
     def _ask_recording(self) -> None:
         """2.15: a Kick or Twitch channel that plays through its buffer has its site asked,
-        once a tune, for the running broadcast's recording; the live session then rewinds
+        once each time its live session starts (a reopen forgets it: a token renewed, a stream
+        that came back), for the running broadcast's recording; the live session then rewinds
         past the buffer into it (`LiveSession.set_site_recording`). Never for a zap step
         passed (it never plays), and never before the picture: the timed start waits for
         nothing."""
         current, live = self._current(), self.live
-        if (
-            self._recording_of is None
-            or current is None
-            or live is None
-            or self._recording_asked is current
-            or not self.pipeline_live()
-        ):
+        if self._recording_of is None or current is None or live is None:
+            return
+        starts = getattr(live, "starts", None)
+        key = (current, live, starts() if callable(starts) else 0)
+        asked = self._recording_asked
+        if asked is not None and asked[0] is key[0] and asked[1] is key[1] and asked[2] == key[2]:
+            return
+        if not self.pipeline_live():
             return
         page = self._site_page(current.item)
         setter = getattr(live, "set_site_recording", None)
         if page is None or setter is None:
             return
-        self._recording_asked = current
+        self._recording_asked = key
 
         def then(found: object) -> None:
             if self._closed() or self._current() is not current or self.live is not live:

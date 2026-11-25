@@ -856,6 +856,9 @@ class FakeLiveSession(QObject):
     def set_site_recording(self, route):  # 2.15: the site's recording of the broadcast
         self.calls.append(("set_site_recording", route))
 
+    def starts(self):  # 2.15: each start forgets the site's recording
+        return len(self.named("start"))
+
     def bring_back(self):
         self.calls.append(("bring_back",))
 

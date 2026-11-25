@@ -148,6 +148,7 @@ class _Record:
     parked: bool = False
     label: dict | None = None  # 2.6: "keep", also sent after a (re)open or a take-back
     where: dict | None = None  # 2.6: "where", likewise
+    join: _Command | None = None  # 2.15: a recording part's "join", sent after its (re)open too
     resume: _Command | None = None  # 2.6: a resume that came before its take-back was sent
     # 2.8: resumed once (a kept buffer): the helper parks it with its disk ring as it stands
     # when the disk fails, never going on in RAM, so its record keeps the disk spec.
@@ -313,7 +314,14 @@ class _Supervisor(QThread):
             if record.sent:  # else after its open (`_send_notes`)
                 conn.send(command)
             return
-        if name in ("until", "junction", "retry_now", "join"):  # never the close fallback below
+        if name == "join":  # 2.15: kept, so a join asked before its open is sent after it
+            if record is None or record.closing:
+                return
+            record.join = command
+            if record.sent:  # else after its open (`_send_notes`)
+                conn.send(command)
+            return
+        if name in ("until", "junction", "retry_now", "stop"):  # never the close fallback below
             if record is not None and record.sent and not record.closing:
                 conn.send(command)
             return
@@ -369,6 +377,8 @@ class _Supervisor(QThread):
             conn.send(("keep", sid, record.label))
         if record.where is not None:
             conn.send(("where", sid, record.where))
+        if record.join is not None:
+            conn.send(record.join)
 
     def _forward_resume(self, conn: Connection, record: _Record, command: _Command) -> None:
         """Send a resume; a helper's death after it reopens with the new source."""
@@ -1019,6 +1029,12 @@ class LiveEngine(QObject):
         view = self._sessions.get(sid)
         if view is not None and not view.closing and not self._shut:
             self._commands.put(("until", sid, int(seq)))
+
+    def set_stop(self, sid: str, stop_date: float | None, stop_s: float | None) -> None:
+        """2.15: a recording part's stop moves (the live buffer's start moved on)."""
+        view = self._sessions.get(sid)
+        if view is not None and not view.closing and not self._shut:
+            self._commands.put(("stop", sid, stop_date, stop_s))
 
     def join(self, sid: str, live_sid: str, seq: int) -> None:
         """2.15: the viewer's stream of recording part `sid` goes on, once its ring ends, into
