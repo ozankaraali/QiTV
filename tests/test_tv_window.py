@@ -661,7 +661,7 @@ class TVWindowTests(WindowCase):
             shortcuts(menus["File"]),
             [
                 ("Open File…", "Ctrl+O"),
-                ("Open Link…", ""),  # plan 4: a stream plays, a provider is added
+                ("Open Link…", "Ctrl+N"),  # plan 4: a stream plays, a provider is added
                 ("Open Folder…", "Ctrl+Shift+O"),  # Plan 4: plays it, on the Folders tab
                 ("Export", ""),
                 ("Open Recordings Folder", ""),
@@ -713,6 +713,7 @@ class TVWindowTests(WindowCase):
             "Quit",
             "Open File…",
             "Open Folder…",  # Plan 4
+            "Open Link…",  # Ctrl+N
             "Live TV",
             "Movies",
             "Series",

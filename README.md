@@ -49,7 +49,7 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 On a first start QiTV opens with a [publicly available playlist](https://github.com/iptv-org/iptv) of free channels from around the world, so you can try it straight away. To add your own provider:
 
 1. Press <kbd>Enter</kbd> (or click the picture) to open the channel list.
-2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). With two or more providers, **All providers** is at its top; once a link has played, **Network streams** comes after your providers (see [Open a link](#open-a-link)). At its bottom are **⚙ Settings**, **＋ Add provider**, **＋ Free channels…** (iptv-org's free playlist again, for all countries or one country), **＋ Free radio…** (internet radio, see [Free radio](#free-radio)), **Open file** (a video or music file on your computer, as <kbd>Ctrl/⌘+O</kbd>), **Open a link** (a single stream's link, as **File → Open Link…**) and **Open a folder** (as <kbd>Ctrl/⌘+Shift+O</kbd>; see [Your own videos and music](#your-own-videos-and-music)).
+2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). With two or more providers, **All providers** is at its top; once a link has played, **Network streams** comes after your providers (see [Open a link](#open-a-link)). At its bottom are **⚙ Settings**, **＋ Add provider**, **＋ Free channels…** (iptv-org's free playlist again, for all countries or one country), **＋ Free radio…** (internet radio, see [Free radio](#free-radio)), **Open file** (a video or music file on your computer, as <kbd>Ctrl/⌘+O</kbd>), **Open a link** (a single stream's link, as **File → Open Link…** or <kbd>Ctrl/⌘+N</kbd>) and **Open a folder** (as <kbd>Ctrl/⌘+Shift+O</kbd>; see [Your own videos and music](#your-own-videos-and-music)).
 3. Choose **＋ Add provider**. [Settings](#settings) opens beside the picture at **Providers**, with the **Add a provider** card over it. The card has one field, **Link or address**, with **Paste**: paste the link or the address your provider gave you, and the line under the field says what QiTV found ("✓ Xtream at …"). Only the fields that kind needs follow:
    - **Xtream:** a link with your username and password in it (`get.php?username=…&password=…` or `player_api.php?…`) fills in the server, the username and the password, each in its own field; a server's address with a username and password typed in is Xtream too;
    - **M3U playlist:** the playlist's web address (one ending in .m3u or .m3u8, or an address with no username), or **M3U file…** for a playlist on your computer;
@@ -90,7 +90,7 @@ The channel list and the Library each remember the provider (or All providers) y
 
 ## Open a link
 
-**File → Open Link…**, or the channel list's **Open a link** row, opens a card with one field and **Paste**: paste a single stream's link and press **Play** (or <kbd>Enter</kbd>). Under the link QiTV says what it is:
+**File → Open Link…** (<kbd>Ctrl/⌘+N</kbd>), or the channel list's **Open a link** row, opens a card with one field and **Paste**: paste a single stream's link and press **Play** (or <kbd>Enter</kbd>). Under the link QiTV says what it is:
 
 - **A live stream** plays as a channel does (with time-shift when it can) and goes into ⟲ Recent.
 - **A film** (a file such as `.mp4` or `.mkv`, or an HLS stream that ends) plays as a film and goes on where you stopped, also when its link comes back with a new token.
@@ -242,6 +242,7 @@ These are also in the app under Settings › Keys (Help → Keyboard Shortcuts o
 | <kbd>Ctrl/⌘+4</kbd> | Multiview |
 | <kbd>Ctrl/⌘+5</kbd> | Recordings |
 | <kbd>Ctrl/⌘+O</kbd> | Open a file |
+| <kbd>Ctrl/⌘+N</kbd> | Open a link |
 | <kbd>Ctrl/⌘+Shift+O</kbd> | Open a folder |
 | <kbd>Ctrl/⌘+,</kbd> | Settings |
 | <kbd>Ctrl/⌘+R</kbd> | Refresh channels and guide |

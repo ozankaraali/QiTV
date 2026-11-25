@@ -444,7 +444,7 @@ class EntryPointTests(WindowCase):
         self.assertEqual(
             [a.text() for a in entries[:3]], ["Open File…", "Open Link…", "Open Folder…"]
         )
-        self.assertTrue(entries[1].shortcut().isEmpty())  # no key of its own
+        self.assertEqual(entries[1].shortcut().toString(), "Ctrl+N")  # ⌘N on a Mac
         # The channel list's row, between Open file and Open a folder, by the keys.
         actions = [n.key for n in window.nav.children(None) if n.layer == "action"]
         at = actions.index(OPEN_FILE_ROW)
