@@ -15,7 +15,12 @@ starts at the oldest segment within a second; a bursty or HLS one (and Stable, t
 for jittery providers) waits for one, saying "Still loading…" after a second; if that takes
 longer than `ready_timeout_ms` from the start, it plays from the oldest segment then.
 Stay-live hears where each such start (and each Go live) landed (`StayLive.landed`): a
-keyframe interval above the target is nudged gently, a shortfall built briefly.
+keyframe interval above the target is nudged gently, a shortfall built briefly. A source
+held close to live (a live site's pieces as made, one keyframe a piece) times its start
+instead (2026-11-25, `_timed_start`): a tune, Go live and stay-live's reopen at live open the
+newest start once it lands at the target (VLC's measured time to its picture counted), or
+wait a piece at most for the next keyframe, the picture playing on meanwhile; a tune first
+lets what the piece being made held land.
 
 Falling back (spec §9) never overlaps two upstream connections: the session is closed and
 the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
@@ -283,6 +288,7 @@ from enum import Enum
 import logging
 import math
 import os
+from statistics import median
 import time
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
@@ -385,6 +391,34 @@ _LAND_ABOVE_S = 0.75  # Go live lands at most this far above the target (when a 
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
+# The timed start (2026-11-25, `_timed_start`): a source held close to live (a live site's
+# pieces as made, `_close_to_live`) has one keyframe a piece (Kick's and Twitch's 2 s), so the
+# start it picks settles its landing only to a piece; when it opens settles it to the moment.
+# Measured on Kick (hel, Auto): tunes landed at what the piece being made already held
+# (0.6-2.0 s, read before it had all come) plus VLC's 0.3 s; Go live 1.2-2.7 s (the newest
+# keyframe, or the one a piece older when the newest was under the band). A tune and Go live
+# open the newest start once it lands at the aim: `_AIM_ABOVE_S` above the target, where
+# stay-live's own landing catch-up ends (`stay_live._CLOSE_LAND_S`: a test keeps them equal;
+# under it VLC's 0.3 s waits between pieces left Low too little room once, and it built that
+# at 0.97x), or VLC's open (play() to its clock's first step, the median of the last
+# `_PICTURE_N`) where that is longer, as nothing lands nearer. Within `_AIM_SHORT_S` short of
+# it to `_AIM_OVER_S` beyond it the start opens at once; short, it waits until it is there;
+# further beyond, for the next keyframe, while that comes within `_AIM_WAIT_S` of the first
+# wait (then today's pick).
+_AIM_ABOVE_S = 0.1
+_AIM_SHORT_S = 0.125
+_AIM_OVER_S = 0.4
+_AIM_WAIT_S = 3.0
+_PICTURE_N = 5
+# A tune's first piece, read as it is made, sends what was made of it at once (up to a piece):
+# its start's age is known once the live edge moved at about real time (`_FLOW_RATES`)
+# between two states `_FLOW_S` or more apart; from then on the edge moves on at real time
+# from the newest state, `_FLOW_AHEAD_S` at most (the helper says where it is every 0.25 s,
+# and at once each half second it moves). A tune not seen flowing so within `_STEADY_WAIT_S`
+# of ready (a source that trickles or stands still: nothing to time) starts as any other.
+_FLOW_S = 0.2
+_FLOW_RATES = (0.5, 1.5)
+_FLOW_AHEAD_S = 0.5
 _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
 # 2.9, AI captions: a picture this far short of their floor waits once to get there (closer, it
 # is stay-live's to steer), and plays on once this close to it.
@@ -753,6 +787,11 @@ class LiveSession(QObject):
         self._last_open = -math.inf  # when the last pipeline play() was made
         self._reopened_at = -math.inf  # when stay-live last reopened at live
         self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
+        # VLC's time to its picture (play() to its clock's first step) over this object's last
+        # opens, and the open still to measure (its play() time); the timed start's aim
+        self._pictures: deque[float] = deque(maxlen=_PICTURE_N)
+        self._picture_due: Optional[float] = None
+        self._aim_since: Optional[float] = None  # a timed start waits since (`_timed_start`)
         self._land_offset = 0.0  # what this tune's picks missed by (see _learn_landing)
         # (opened, lag predicted, the lag filter's level and marks then) of a landing measured
         self._land_check: Optional[tuple[float, float, float, tuple[int, int]]] = None
@@ -1058,6 +1097,7 @@ class LiveSession(QObject):
         self._limited = None
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
+        self._picture_due = self._aim_since = None
         self._edge_seen = None
         self._reopened_at = -math.inf
         self._filter = LagFilter()  # a new source: its burst too is known afresh
@@ -1183,6 +1223,7 @@ class LiveSession(QObject):
             # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
             # or while recovering it is remembered: the stream that opens next is paused.
             self._paused = True
+            self._picture_due = None  # an open paused before it played measures nothing
             self._set_rate(1.0)
             self._stay.user_paused()
             if playing:
@@ -1320,7 +1361,9 @@ class LiveSession(QObject):
         Stay-live hears where an open landed (`StayLive.landed`); `build` (default: neither
         `reopen` nor `merge`) whether a shortfall then is missing room, built once: a
         recovery's or the RAM ring's fresh buffer may hold little, while Go live and a jump
-        pick at the target in a full one."""
+        pick at the target in a full one. On a source held close to live Go live and a jump
+        time their start (`_timed_start`, 2026-11-25): one that waits for its moment is
+        looked at again on each tick and state, the picture playing on meanwhile."""
         build = not (reopen or merge) if build is None else build
         landing: Optional[float] = None
         merged = False
@@ -1350,7 +1393,10 @@ class LiveSession(QObject):
                 # A pick from a lag filter that settled since it last started afresh misses by
                 # its own error only: what it misses is learned.
                 filtered = not self._was_stalled and self._filter.settled(self._clock())
-                pick = self._live_start()
+                if self._aiming(build=build):  # a source held close to live: when, not which
+                    pick = self._timed_start(self._snapshot())
+                else:
+                    pick = self._live_start()
                 if pick is None or not self._open_at(pick[0]):
                     # The tick tries again, as the same kind of open.
                     retry = _Retry.LIVE if build else _Retry.GO_LIVE
@@ -2336,6 +2382,14 @@ class LiveSession(QObject):
                 self._go_live(unpause=False)
             else:
                 self.seek_to(seek)
+        elif (
+            self._phase is _Phase.PIPELINE
+            and self._aim_since is not None
+            and self._retry in (_Retry.GO_LIVE, _Retry.REOPEN)
+        ):
+            # A timed start waits for its moment: each state is a look as each tick is (the
+            # next keyframe is seen first here).
+            self._go_live(unpause=False, reopen=self._retry is _Retry.REOPEN, build=False)
 
     def _on_ready_timeout(self) -> None:
         if self._phase is not _Phase.WAITING:
@@ -2416,6 +2470,12 @@ class LiveSession(QObject):
         `_LOADING_AFTER_S` (but a raw TS backlog's) says "Still loading…". `waited`: the ready
         timeout ran out: the best start there is now. Stay-live hears where it landed
         (`StayLive.landed`).
+
+        A source held close to live (2026-11-25) times its start instead (`_timed_start`),
+        once what was made of the piece being made has landed and the rest comes at real
+        time (`_flowing`) and its playlist's backlog came (`caught_up`), and says nothing
+        meanwhile (a piece and a bit at most, `_AIM_WAIT_S`; then as above); one not seen
+        flowing within `_STEADY_WAIT_S` of ready starts as above.
         """
         snapshot = self._snapshot()
         if self._ended or snapshot.get("ended") is True or snapshot.get("finite") is True:
@@ -2424,6 +2484,17 @@ class LiveSession(QObject):
                 self._first_open(oldest, None)  # nothing live to land near
             return
         self._follow_prefetch(snapshot)  # before the target places the start
+        if not waited and self._aiming():
+            if snapshot.get("caught_up") is True and self._flowing():
+                # The edge now: the newest state's, moved on at real time since it came.
+                since = self._clock() - self._edges[-1][0]
+                timed = self._timed_start(snapshot, ahead=min(max(since, 0.0), _FLOW_AHEAD_S))
+                if timed is not None:
+                    self._first_open(*timed, aimed=True)
+                return
+            ready = self._clock() - self._ready_at
+            if self._aim_since is not None or ready < _STEADY_WAIT_S - 1e-9:
+                return  # what the piece being made held still lands (or the flow hitched)
         hls = snapshot.get("hls") is True
         ahead = self._ahead(snapshot)
         pick = self._live_start(cushion=True, ahead=ahead)
@@ -2985,6 +3056,8 @@ class LiveSession(QObject):
                     self._open_first_again()
             elif not self._gave_up():
                 retry = self._retry
+                if self._aim_since is not None:
+                    self._follow_arrivals(self._snapshot())  # a timed start waits: VLC plays
                 self._go_live(
                     unpause=False, reopen=retry is _Retry.REOPEN, build=retry is _Retry.LIVE
                 )
@@ -3669,9 +3742,9 @@ class LiveSession(QObject):
         """Tell the learned target this tick (its integration contract):
 
         - the live edge, every tick the pipeline plays on (`arrivals.add`; not while the
-          session waits for the helper, retries an open or defers one: no edge then); a VLC
-          reopen restarts nothing there, only another stream from the helper does
-          (`_recover`);
+          session waits for the helper, retries an open or defers one: no edge then, but for
+          a timed start's wait, `_follow_arrivals`); a VLC reopen restarts nothing there, only
+          another stream from the helper does (`_recover`);
         - a stall once when it begins (the bound passed: silence beyond the helper's burst
           plus `STALL_S`), with that burst (0 for a stall the 2 s bound found), only while
           stay-live is live and after the cushion (`_ran_out`): `stalled()`, which notes it
@@ -4088,6 +4161,16 @@ class LiveSession(QObject):
         starved): past `VlcClock.hold()`, 1.5 learned intervals plus a quarter second."""
         playing = self._playback.state() is PlaybackState.PLAYING
         return playing and self._vlc.frozen()
+
+    def _follow_arrivals(self, snapshot: Mapping[str, Any]) -> None:
+        """While a timed start waits for its moment (`_timed_start`, up to `_AIM_WAIT_S`) the
+        source's arrivals are taken in as on any tick: the lag filter's edge (`_observe`),
+        which places the start, and the learned target's (`arrivals.add`). VLC plays on
+        meanwhile, so nothing else is judged; a gap in them would read as a wait of the
+        source's (in a simulated 1.5 s wait, Auto's need rose from 1.15 to 1.85 s)."""
+        self._observe(snapshot, self._stalled(snapshot))
+        if self._learned is not None:
+            self._learned.arrivals.add(self._clock(), self._live_edge(snapshot))
 
     def _observe(self, snapshot: Mapping[str, Any], stalled: bool) -> None:
         """Give the lag filter this tick's live edge. A stalled source adds nothing (its
@@ -4691,7 +4774,7 @@ class LiveSession(QObject):
             mean = self._filter.edge(self._clock())  # None before its first edge
         if mean is None:
             mean = self._live_edge(snapshot) + ahead + self._burst_shift(snapshot)
-        edge = mean + self._open_s + self._land_offset  # what this tune's picks missed by
+        edge = mean + self._open_time() + self._land_offset  # what this tune's picks missed by
         return sorted((edge - start, seq) for start, seq in starts)
 
     def _live_start(
@@ -4721,7 +4804,7 @@ class LiveSession(QObject):
             edge = self._live_edge(snapshot) + ahead
             return (
                 oldest,
-                edge - self._start_of(oldest) + self._burst_shift(snapshot) + self._open_s,
+                edge - self._start_of(oldest) + self._burst_shift(snapshot) + self._open_time(),
             )
         ranks = self._qualities(snapshot)
         # Stay-live slows down only to build room, gently and briefly, so a landing below the
@@ -4746,6 +4829,94 @@ class LiveSession(QObject):
         else:
             lag, seq = safe[0]
         return seq, lag
+
+    def _open_time(self) -> float:
+        """How long VLC takes to play a start it opens, as the picks count it (the edge moves
+        on meanwhile): on a source held close to live its time to its picture (`_picture_s`),
+        else its open time as ever (`_open_s`, play() to Playing)."""
+        return self._picture_s() if self._close_to_live() else self._open_s
+
+    def _picture_s(self) -> float:
+        """VLC's time to its picture: from play() to its clock's first step, the median of
+        this object's last `_PICTURE_N` opens on a source held close to live. Measured on
+        hel's libVLC 3.0.23, Kick 1080p60: 0.29-0.34 s, its 300 ms caching (`_CACHING_S`),
+        which stands in before any was measured: VLC plays nothing sooner, so a first start
+        lands short of its aim by nothing, above it by what a slower VLC takes more. The
+        median sets a slow open aside (the poll of VLC's Playing quantises `_open_s` to a
+        quarter second)."""
+        return median(self._pictures) if self._pictures else _CACHING_S
+
+    def _aiming(self, *, build: bool = False) -> bool:
+        """A start is timed (`_timed_start`): the source is held close to live, it plays
+        (a pause kept, or VLC paused when Go live was pressed, opens at once, as a
+        recovery's or the RAM ring's fresh buffer does: `build`), and the timed start has
+        not waited `_AIM_WAIT_S` yet."""
+        if build or self._paused or not self._close_to_live():
+            return False
+        if self._phase is _Phase.PIPELINE and self._playback.state() is PlaybackState.PAUSED:
+            return False
+        since = self._aim_since
+        return since is None or self._clock() - since < _AIM_WAIT_S - 1e-9
+
+    def _timed_start(
+        self, snapshot: Mapping[str, Any], *, ahead: float = 0.0
+    ) -> Optional[tuple[int, float]]:
+        """The start a source held close to live opens at now (a tune, Go live, stay-live's
+        reopen at live: `_aiming`), and the lag it gives once VLC plays it; None while it
+        waits for its moment (2026-11-25, see `_AIM_SHORT_S`).
+
+        Among the clean starts (keyframes first, as `_live_start`), the one landing nearest
+        the aim, `_AIM_ABOVE_S` above the target or VLC's time to its picture where that is
+        longer, within `_AIM_SHORT_S` short of it to `_AIM_OVER_S` beyond. Without one: the
+        newest lands short, and waits as it ages; or every start lands further beyond, and
+        the next keyframe (the newest one's spacing on, the last closed segment's length) is
+        waited for and then its moment. Either way only while that comes within `_AIM_WAIT_S` of
+        the first wait: else the start nearest the aim, now. `ahead`: how far the live edge
+        is past the state's (a tune's, between its states)."""
+        now = self._clock()
+        if self._aim_since is None:
+            self._aim_since = now
+        means = self._start_lags(snapshot, ahead)
+        ranks = self._qualities(snapshot)
+        clean = [mean for mean in means if ranks.get(mean[1], 0) < _QUALITY_RANK["none"]]
+        keys = [mean for mean in clean if ranks.get(mean[1], 0) == _QUALITY_RANK["key"]]
+        keys = keys or clean
+        if not keys:
+            return None  # nothing starts cleanly yet: a keyframe is on its way
+        picture = self._picture_s()
+        aim = max(self._aim(snapshot) + _AIM_ABOVE_S, picture)
+        near = [mean for mean in keys if aim - _AIM_SHORT_S <= mean[0] <= aim + _AIM_OVER_S]
+        if near:
+            lag, seq = min(near, key=lambda mean: (abs(mean[0] - aim), mean[0]))
+            return seq, lag
+        lag, seq = keys[0]  # the newest
+        if lag < aim - _AIM_SHORT_S:
+            due = aim - _AIM_SHORT_S - lag  # it lands there that much later
+        else:
+            # The next keyframe comes once the newest one is its spacing old (at once when
+            # that is not known), and lands at the aim's band then or a moment later.
+            spans = self._engine.spans(self._sid) if self._sid is not None else []
+            spacing = spans[-1].end - spans[-1].start if spans else 0.0
+            age = lag - picture - self._land_offset
+            due = max(0.0, spacing - age) + max(0.0, aim - _AIM_SHORT_S - picture)
+        if now - self._aim_since + due <= _AIM_WAIT_S + 1e-9:
+            return None
+        lag, seq = min(keys, key=lambda mean: (abs(mean[0] - aim), mean[0]))
+        return seq, lag
+
+    def _flowing(self) -> bool:
+        """A tune's first piece, read as it is made: what was made of it came at once and the
+        rest comes at real time (`_FLOW_S`): the live edge grew by `_FLOW_RATES` times the
+        time between the newest state and the latest one `_FLOW_S` or more before it
+        (`_edges`, the states while the start waits)."""
+        if not self._edges:
+            return False
+        at, edge = self._edges[-1]
+        low, high = _FLOW_RATES
+        for then, seen in reversed(self._edges[:-1]):
+            if at - then >= _FLOW_S - 1e-9:
+                return low * (at - then) - 1e-9 <= edge - seen <= high * (at - then) + 1e-9
+        return False
 
     def _jump_lag(self) -> Optional[float]:
         """Where a jump to live (stay-live's reopen, 2.1) would land now: the mean lag
@@ -4834,6 +5005,12 @@ class LiveSession(QObject):
             self._clock(), ms, playing, self._rate, limit=limit, breaks=breaks
         )
         self._last_ms = ms
+        due = self._picture_due
+        if due is not None and ms > 0 and playing:
+            # VLC's first step: its clock started that long ago (at its rate) since play().
+            self._picture_due = None
+            took = self._clock() - due - ms / 1000 / max(self._rate, 0.25)
+            self._pictures.append(min(max(took, 0.0), _OPEN_MAX_S))
         return self._base + self._elapsed
 
     def _set_rate(self, rate: float) -> None:
@@ -4861,6 +5038,10 @@ class LiveSession(QObject):
         self._elapsed = 0.0
         self._last_ms = 0
         self._opened_at = self._last_open = self._clock()
+        # VLC's time to its picture, measured where a start is timed with it (a source held
+        # close to live; a paused open plays when the viewer says)
+        self._picture_due = self._opened_at if self._close_to_live() and not self._paused else None
+        self._aim_since = None  # a timed start that waited opened, or something else did
         self._vlc.restart(self._last_open)  # VLC's clock starts at the segment's start
         self._stay.absorb()  # the position starts afresh: a step, not a drift
         self._settled.reset()  # and the lag shows where it landed at once

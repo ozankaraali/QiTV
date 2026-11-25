@@ -6867,16 +6867,19 @@ class LearnedTargetTests(LiveSessionCase):
             with self.subTest(prefetching=prefetching):
                 self.live = self.make()
                 sid = self.start(latency=AUTO, channel="ch")
-                self.engine.buffer(
-                    sid,
-                    spans,
-                    live_edge=10.5,
-                    open_seq=5,
-                    hls=True,
-                    caught_up=True,
-                    prefetching=prefetching,
-                )
-                self.engine.sessionReady.emit(sid)
+                for edge in (10.5, 10.75):  # ready, then a quarter second on at real time
+                    self.engine.buffer(
+                        sid,
+                        spans,
+                        live_edge=edge,
+                        open_seq=5,
+                        hls=True,
+                        caught_up=True,
+                        prefetching=prefetching,
+                    )
+                    if edge == 10.5:
+                        self.engine.sessionReady.emit(sid)
+                    self.clock.now += 0.25
                 self.assertAlmostEqual(self.live._target(self.engine.snapshot(sid)), target)
                 self.assertEqual(len(self.playback.plays), 1)
                 self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, seq))
@@ -9537,11 +9540,13 @@ class BorrowedTests(LiveSessionCase):
         self.assertEqual(len(self.engine.opened), 1)
 
 
-def site_feed(case, sid, *, edge, wait=0.3, piece=4.25):
+def site_feed(case, sid, *, edge, wait=0.3, piece=4.25, open_s=0.3):
     """A live site's source read at its prefetch pieces (`prefetching`): media at real time
     a quarter second at a time, the edge standing still `wait` s more where each `piece`
-    ends (the next piece's request), what was made meanwhile coming at once."""
-    feed = Feed(case, sid, burst=0.0, edge=edge, hls=True)
+    ends (the next piece's request), what was made meanwhile coming at once. VLC takes
+    `open_s` to play what it opens (its 300 ms caching: a start timed to the moment,
+    `_timed_start`, counts on it)."""
+    feed = Feed(case, sid, burst=0.0, edge=edge, hls=True, open_s=open_s)
     feed.prefetching = True
     quarters = round(piece / 0.25)
     feed.gaps = itertools.cycle([0.25] * (quarters - 1) + [0.25 + wait])
@@ -9561,20 +9566,31 @@ class PrefetchTargetTests(LiveSessionCase):
     at the target. Any other source keeps today's numbers."""
 
     def tune(self, latency, *, prefetching=True, **kwargs):
+        """Ready at `live_edge` (6.15 s), then at real time a quarter second at a time until
+        the tune played (a start timed to the moment, `_timed_start`, waits for the source
+        to flow so, and for its moment)."""
         sid = self.start(latency=latency, channel="ch")
         kwargs.setdefault("live_edge", 6.15)
         self.engine.buffer(
             sid, segments(0, 3), open_seq=3, hls=True, prefetching=prefetching, **kwargs
         )
         self.engine.sessionReady.emit(sid)
+        while not self.playback.plays and kwargs["live_edge"] < 7.9:
+            self.clock.now += 0.25
+            kwargs["live_edge"] += 0.25
+            self.engine.buffer(
+                sid, segments(0, 3), open_seq=3, hls=True, prefetching=prefetching, **kwargs
+            )
         return sid
 
     def lags(self, feed, seconds):
-        """The mean lag the session steers by, each tick over `seconds` of `feed`."""
+        """The mean lag the session steers by, each tick over `seconds` of `feed` (from its
+        first, once the tune played)."""
         lags = []
         for _ in range(round(seconds / 0.25)):
             feed.run(0.25)
-            lags.append(self.timelines[-1]["lag"])
+            if self.timelines:
+                lags.append(self.timelines[-1]["lag"])
         return lags
 
     def test_a_prefetch_source_under_low_targets_half_a_second(self):
@@ -9592,7 +9608,7 @@ class PrefetchTargetTests(LiveSessionCase):
         # After a starvation it rises as today.
         sid = self.start(latency=AUTO, channel="ch")
         feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
-        feed.run(0.25)
+        feed.run(2.0)  # the start, timed to the moment (`_timed_start`)
         self.assertAlmostEqual(self.timelines[-1]["target"], 1.0)
         lags = self.lags(feed, 180.0)
         self.assertAlmostEqual(self.timelines[-1]["target"], 1.0, delta=0.15)
@@ -9664,7 +9680,10 @@ class PrefetchTargetTests(LiveSessionCase):
         # Starts 6.65, 4.65, 2.65 and 0.65 s behind once VLC opened them (0.5 s): Low's 0.5 s
         # on a prefetch source takes the newest (a quarter second short at most,
         # `_BELOW_TARGET_S`; `_LAND_ABOVE_S` over); today's 1 s takes the one 2.65 s behind.
-        # So does Go live (the open measured at once: 0.35 s), at 0.5 s against 2.5 s.
+        # So does Go live (the open measured at once: 0.35 s), at 0.5 s against 2.5 s: on the
+        # prefetch source a moment later, once the newest start lands there (`_timed_start`:
+        # with VLC's 0.3 s caching, at 0.45 s it lands short of the aim, 0.6 s; the source's
+        # next state a quarter second on takes it there).
         for prefetching, first, again in ((True, 3, 5), (None, 2, 4)):
             with self.subTest(prefetching=prefetching):
                 self.live = self.make()
@@ -9681,19 +9700,27 @@ class PrefetchTargetTests(LiveSessionCase):
                     prefetching=prefetching,
                 )
                 self.live.go_live()
+                self.clock.now += 0.25
+                self.engine.buffer(
+                    sid,
+                    segments(0, 5),
+                    live_edge=10.4,
+                    open_seq=5,
+                    hls=True,
+                    prefetching=prefetching,
+                )
                 self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, again))
 
     def test_a_close_source_holds_its_target_through_its_piece_waits(self):
-        # Under Low: lands 1.3 s over the target (the newest keyframe 1.3 s back), takes it
-        # off at 1.10x within seconds (once: the landing's), lands just above the target and
-        # holds there through the 0.3 s waits between pieces: no stall (the 2 s bound), no
-        # trouble, no hold, no slow-down for room (under 0.3 s), no other nudge.
+        # Under Low: the newest keyframe is 1.3 s back at the tune, so the start waits for the
+        # next one and its moment (`_timed_start`), lands at the target and holds there
+        # through the 0.3 s waits between pieces: no catch-up (before the timed start, one at
+        # 1.10x took the landing's excess off), no stall (the 2 s bound), no trouble, no
+        # hold, no slow-down for room (under 0.3 s), no nudge at all.
         sid = self.start(latency="low", channel="ch")
         feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
         lags = self.lags(feed, 120.0)
-        self.assertEqual(max(self.playback.rates), stay_live._CLOSE_UP)
-        self.assertEqual(min(self.playback.rates), 1.0)
-        self.assertEqual(changes(self.playback.rates), 2)  # one nudge, in and out
+        self.assertEqual(changes(self.playback.rates), 0)
         tail = lags[-240:]
         self.assertLessEqual(sum(tail) / len(tail), 0.8)
         self.assertGreaterEqual(min(tail), 0.3)
@@ -9790,6 +9817,128 @@ class PrefetchTargetTests(LiveSessionCase):
         self.live.set_caption_floor(0.0)
         feed.run(0.5)
         self.assertTrue(self.live._stay.close and learned.close)
+
+
+def piece_feed(case, sid, *, made, open_s, piece=2.0, prefetching=True):
+    """A live site's tune as Kick's pieces come (2 s each, each beginning with a keyframe:
+    the feed's `gop`): what was made of the piece being made, `made` seconds, comes at once
+    in half-second states 20 ms apart (the first with the ready, as the helper says ready on
+    its first keyframe), then media at real time a quarter second at a time. VLC takes
+    `open_s` to play what it opens (its 300 ms caching; more on a slower computer)."""
+    feed = Feed(case, sid, burst=0.0, edge=min(made, 0.25), gop=piece, hls=True, open_s=open_s)
+    feed.plays_seen = len(case.playback.plays)  # an earlier tune's play is not this one's
+    feed.prefetching = prefetching
+    feed.push()
+    case.engine.sessionReady.emit(sid)
+    while feed.edge < made - 1e-9:
+        case.clock.now = round(case.clock.now + 0.02, 6)
+        feed.edge = min(made, feed.edge + 0.5)
+        feed.push()
+    feed.nominal = feed.next_arrival = case.clock.now + 0.25  # at real time from here
+    return feed
+
+
+class TimedStartTests(LiveSessionCase):
+    """2026-11-25 (the owner, next to Kick's own player: a tune came in 3.7 s behind Auto's
+    second and took 25 s at 1.10x to get there, Go live 2.6 s and 14 s). A source held close
+    to live (`_close_to_live`) has a keyframe a piece (2 s), so which start plays settles
+    its landing to a piece; when it opens settles it to the moment. A tune and Go live open
+    the newest start once it lands at the target (VLC's open as measured), never one a piece
+    older; one that lands further above waits for the next keyframe, a piece at most. The
+    tune first lets what the piece being made already held land (it comes at once, and the
+    start's age is not known before). Any other source starts as today."""
+
+    def landing(self, feed, plays):
+        """Run until the session opens its next stream and VLC has played it a second and a
+        half: (the lag then, VLC's edge less its position; the wait for the open)."""
+        waited = 0.0
+        while len(self.playback.plays) == plays:
+            feed.run(Feed.DT)
+            waited += Feed.DT
+            self.assertLess(waited, 6.0, "no start opened")
+        while self.playback.current is not PlaybackState.PLAYING:
+            feed.run(Feed.DT)
+        feed.run(1.5)
+        return feed.edge - feed.position, waited
+
+    def tune_at(self, latency, made, open_s, prefetching=True):
+        self.start(latency=latency, channel="ch")
+        self.engine.answer()
+        sid = self.engine.last_sid
+        return piece_feed(self, sid, made=made, open_s=open_s, prefetching=prefetching)
+
+    def test_a_tune_lands_at_its_target_whatever_the_piece_being_made_held(self):
+        # Eight phases of the piece being made at the tune, VLC's open 0.3 s (not measured
+        # before the first): each lands a quarter second short of the target to half a second
+        # beyond it, a quarter second off it on average, never a piece further back; the open
+        # comes within a piece and a bit, and VLC never runs dry after it.
+        for latency, target in (("low", 0.5), (AUTO, 1.0)):
+            self.live, misses = self.make(), []
+            for made in (0.1, 0.35, 0.6, 0.85, 1.1, 1.35, 1.6, 1.85):
+                with self.subTest(latency=latency, made=made):
+                    plays = len(self.playback.plays)
+                    feed = self.tune_at(latency, made, 0.3)
+                    lag, waited = self.landing(feed, plays)
+                    self.assertGreaterEqual(lag, target - 0.25)
+                    self.assertLessEqual(lag, target + 0.55)
+                    misses.append(abs(lag - target))
+                    self.assertLessEqual(waited, 2.75)
+                    feed.run(20.0)
+                    self.assertEqual(feed.starved_s, 0.0)
+            self.assertLessEqual(sum(misses) / len(misses), 0.25)
+
+    def test_go_live_lands_at_its_target_whatever_the_piece_being_made_held(self):
+        # Go live at eight phases of the newest piece: the start then is a quarter piece
+        # older each time. Each lands a quarter second short of the target to half a second
+        # beyond it, or of VLC's open where that is longer (1.5 s: nothing lands nearer), a
+        # quarter second off it on average, never a piece further back; the open waits a
+        # piece and a bit at most; VLC never runs dry, and Auto's second holds (a wait taken
+        # for one of the source's would raise it).
+        for latency, target in (("low", 0.5), (AUTO, 1.0)):
+            for open_s in (0.3, 1.5):
+                with self.subTest(latency=latency, open_s=open_s):
+                    self.live = self.make()
+                    feed = self.tune_at(latency, 1.0, open_s)
+                    self.landing(feed, 0)
+                    feed.run(20.0)
+                    best, misses = max(target, open_s), []
+                    for phase in (0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75):
+                        while abs(feed.edge % 2.0 - phase) > 1e-6:
+                            feed.run(Feed.DT)
+                        plays = len(self.playback.plays)
+                        self.live.go_live()
+                        lag, waited = self.landing(feed, plays)
+                        self.assertGreaterEqual(lag, best - 0.25, f"phase {phase}")
+                        self.assertLessEqual(lag, best + 0.55, f"phase {phase}")
+                        misses.append(abs(lag - best))
+                        self.assertLessEqual(waited, 2.75, f"phase {phase}")
+                        feed.run(15.0)
+                    self.assertLessEqual(sum(misses) / len(misses), 0.25)
+                    self.assertEqual(feed.starved_s, 0.0)
+                    self.assertTrue(self.live._stay.close)  # no wait read as the source's
+
+    def test_the_aim_is_where_stay_lives_own_landing_ends(self):
+        self.assertEqual(live_session._AIM_ABOVE_S, stay_live._CLOSE_LAND_S)
+
+    def test_a_source_not_held_close_starts_as_today(self):
+        # Plain HLS (no prefetch pieces) under Low and Auto, and Normal on a prefetch source:
+        # Go live opens at once, at today's pick, at every phase.
+        for latency, prefetching in (("low", None), (AUTO, None), ("normal", True)):
+            with self.subTest(latency=latency, prefetching=prefetching):
+                self.live = self.make()
+                feed = self.tune_at(latency, 1.0, 0.3, prefetching=prefetching)
+                self.landing(feed, 0)
+                feed.run(20.0)
+                for phase in (0.0, 0.5, 1.0, 1.5):
+                    while abs(feed.edge % 2.0 - phase) > 1e-6:
+                        feed.run(Feed.DT)
+                    pick = self.live._live_start()
+                    plays = len(self.playback.plays)
+                    self.live.go_live()
+                    self.assertEqual(len(self.playback.plays), plays + 1)  # at once
+                    url = self.engine.stream_url(self.engine.last_sid, pick[0])
+                    self.assertEqual(self.playback.plays[-1][0], url)
+                    feed.run(15.0)
 
 
 class BroadcasterTests(LiveSessionCase):
