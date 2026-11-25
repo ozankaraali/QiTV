@@ -232,6 +232,10 @@ class LinkLanes(QObject):
         self._generation += 1
         return self._generation
 
+    def generation(self) -> int:
+        """The newest choice's number (`supersede`): another one since is a newer choice."""
+        return self._generation
+
     # ---- the tune lane ------------------------------------------------------------------------
 
     def request(self, target: Target) -> None:

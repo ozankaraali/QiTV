@@ -79,11 +79,12 @@ class SiteWaits(QObject):
         group: Optional[tuple[str, list]],
         why: str,
         tv: Any = None,
-    ) -> Optional[bool]:
+    ) -> Optional[str]:
         """Why phone `device`'s own ask for `target` (its Watch) failed (as it is kept:
-        English): True when it begins to wait (the site says the channel isn't live now; a
-        channel another phone waits for already is waited for together), False when it waits
-        on (it waited for it already: the site still says so, or never answered), None for
+        English): "new" when it begins to wait and the channel's wait begins with it (asked
+        again after the calm wait), "joined" when it begins to wait for a channel other phones
+        wait for already (the channel's asks and an ask on its way are left as they are), "on"
+        when it waited for it already (the site still says so, or never answered), None for
         anything else (its wait, if any, ends: the reason is said as ever)."""
         mine = self.wait_of(device)
         channel = self._of_channel(target)
@@ -93,19 +94,19 @@ class SiteWaits(QObject):
             return None
         if mine is not None and mine is not channel:
             self.end(device)
-        if channel is None:
-            channel = SiteWait(target, group, tv=tv)
-            self._waits.append(channel)
-        if device in channel.devices:
-            channel.devices.remove(device)
-        channel.devices.append(device)  # the last to ask: the one it plays on once it is live
-        channel.asking = False
+        if waits_on:
+            return "on"
+        if channel is not None:
+            channel.devices.append(device)  # the last to ask: the one it plays on once live
+            return "joined"
+        channel = SiteWait(target, group, devices=[device], tv=tv)
+        self._waits.append(channel)
         delay = _next_ask()
         self._arm(channel, delay)  # (it was just asked: the next after the calm wait)
         logger.info(
             "%s is not live now (a phone's); asking its site again in %.0f s", target.title, delay
         )
-        return not waits_on
+        return "new"
 
     def answered(self, wait: SiteWait, why: str) -> Optional[bool]:
         """The channel's ask again got no stream: False when it waits on (the site says it
@@ -119,6 +120,13 @@ class SiteWaits(QObject):
             return False
         self._drop(wait)
         return None
+
+    def ask_later(self, wait: SiteWait) -> None:
+        """The channel's ask came to nothing (its stream was not taken): asked again after the
+        calm wait, not the lost answer's."""
+        if self.current(wait):
+            wait.asking = False
+            self._arm(wait, _next_ask())
 
     def take(self, wait: SiteWait) -> Optional[list[str]]:
         """The site gave the channel a stream: its phones (the last to ask last), and the wait
