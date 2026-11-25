@@ -1775,7 +1775,8 @@ class HlsSource:
       naming its own encoding, a connection pinned to one) is set aside and the playlist asked
       for again on a new connection each second, until such copies persist as long as a stale
       copy is waited out (at least 4 s): a restart, or ours went down, followed with a marker
-      (`_other_copy`);
+      (`_other_copy`); a live site's piece being made, listed finished under another name, is
+      not one (`_relisted`);
     - reloads that bring no new segment for 60 s (download time excluded) time out;
     - a live playlist's reload that keeps failing (a broken connection, a 5xx) through the
       quick delays is asked for again after the long ones, for as long as it is read
@@ -1905,6 +1906,9 @@ class HlsSource:
         self._note_window(playlist)
         self._keys: dict[str, bytes] = {}
         self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
+        # The pieces being made passed (fetched, or skipped as an ad's) by media sequence: the
+        # date reckoned for each and its length (`_relisted`), the newest `_RECENT_SEGMENTS`.
+        self._prefetched: dict[int, tuple[datetime | None, float]] = {}
         self._discontinuity_sequence = playlist.discontinuity_sequence
         self._failures = 0
         self._started = False  # bytes were yielded
@@ -2194,9 +2198,10 @@ class HlsSource:
     def _other_copy(self, playlist: Any, base: str, next_sequence: int, quiet: float) -> bool:
         """Whether this copy is another origin group's (2.6.1: two groups behind one address,
         each numbering and naming its own encoding, answering in turn): it names the segment
-        last fetched otherwise; or it lists none of them and is numbered ahead further than
-        `quiet` (the time since a copy of ours) explains, or behind with none of their names
-        and no newer discontinuity sequence (a stale copy overlaps; a restart says so)."""
+        last fetched otherwise (but a piece being made relisted finished: `_relisted`); or it
+        lists none of them and is numbered ahead further than `quiet` (the time since a copy
+        of ours) explains, or behind with none of their names and no newer discontinuity
+        sequence (a stale copy overlaps; a restart says so)."""
         if not self._recent:
             return False
         first = playlist.media_sequence or 0
@@ -2204,7 +2209,10 @@ class HlsSource:
         for sequence in range(next_sequence - 1, next_sequence - 1 - len(self._recent), -1):
             index = sequence - first
             if 0 <= index < len(segments) and not segments[index].gap_tag:
-                return _identity(_resolve(base, segments[index].uri)) not in self._recent
+                segment = segments[index]
+                if _identity(_resolve(base, segment.uri)) in self._recent:
+                    return False
+                return not self._relisted(segment, sequence, segments)
         if first > next_sequence:  # a fall behind the window comes no faster than its segments
             step = 0.5 * max(1.0, float(playlist.target_duration or 0))
             return first - next_sequence > math.ceil(quiet / step) + 3
@@ -2214,6 +2222,31 @@ class HlsSource:
             return False
         names = {_identity(_resolve(base, segment.uri)) for segment in segments}
         return names.isdisjoint(self._recent)
+
+    def _passed(self, segment: Any, sequence: int) -> None:
+        """A piece being made was passed (fetched, or skipped as an ad's): its media sequence
+        is remembered with the date reckoned for it and its length (`_relisted`)."""
+        dated = segment.current_program_date_time or segment.program_date_time
+        known = self._prefetched
+        known.pop(sequence, None)
+        known[sequence] = (None if dated is None else _utc(dated), float(segment.duration or 0))
+        while len(known) > _RECENT_SEGMENTS:
+            del known[next(iter(known))]
+
+    def _relisted(self, segment: Any, sequence: int, segments: Sequence[Any]) -> bool:
+        """A copy's finished piece at the media sequence of a piece being made that was passed
+        (`_passed`) is that piece, listed under another name (2026-11-25: Twitch's, in its
+        next copy, the same bytes and dated as reckoned): its date is within half a piece of
+        the one reckoned for it, or either is unknown and the copy (`segments`) lists pieces
+        being made."""
+        known = self._prefetched.get(sequence)
+        if known is None or _is_prefetch(segment):
+            return False
+        reckoned, length = known
+        dated = segment.current_program_date_time or segment.program_date_time
+        if reckoned is None or dated is None:
+            return _finished(segments) < len(segments)
+        return abs((_utc(dated) - reckoned).total_seconds()) <= length / 2
 
     def _run(self) -> Iterator[Chunk]:
         http, playlist, url = self._http, self._playlist, self._url
@@ -2249,6 +2282,7 @@ class HlsSource:
                 if next_sequence is not None:
                     self._mark()
                     next_sequence = first + self._start(playlist)  # its numbers are not ours
+                    self._prefetched.clear()
             other, ours = None, loaded
             self._note_window(playlist)
             if next_sequence is None:
@@ -2267,12 +2301,14 @@ class HlsSource:
                 log.info("The HLS playlist moved past %d segments.", first - next_sequence)
                 self._mark()
                 next_sequence = first if self._back is not None else first + self._start(playlist)
+                self._prefetched.clear()
             elif newest < next_sequence - 1:
                 stale = not self._restarted(playlist, url, loaded - progress)
                 if not stale:
                     log.info("The HLS media sequence restarted.")
                     self._mark()
                     next_sequence = first + self._start(playlist)
+                    self._prefetched.clear()
             if not stale:
                 self._discontinuity_sequence = playlist.discontinuity_sequence
             fresh = newest >= next_sequence
@@ -2319,6 +2355,8 @@ class HlsSource:
                     made = True
                     yield CaughtUp()  # the backlog landed: from here, pieces as they are made
                 next_sequence = sequence + 1
+                if _is_prefetch(segment):
+                    self._passed(segment, sequence)
                 if segment.discontinuity:
                     self._mark()
                 if self._ad(segment):

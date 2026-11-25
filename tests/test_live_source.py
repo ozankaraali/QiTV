@@ -127,6 +127,30 @@ def dated(sequence, names, *, ads=(), ranges=None, prefetch=(), titles=None, tar
     return text.encode()
 
 
+def site_playlist(
+    sequence,
+    finished,
+    prefetch,
+    *,
+    length=2.0,
+    dates=True,
+    shift=0.0,
+    tag="#EXT-X-TWITCH-PREFETCH:",
+):
+    """A live site's media playlist as Twitch writes it: `finished` pieces of `length` seconds
+    from media sequence `sequence` under a 6 s target duration, each dated by its sequence
+    (piece k began k × `length` after `DAY`, `shift` seconds later; undated without `dates`),
+    then `prefetch`, the pieces still being made, on `tag` lines (Kick's: ``#EXT-X-PREFETCH:``,
+    and nothing of Twitch's in it then)."""
+    text = f"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n"
+    for k, name in enumerate(finished):
+        if dates:
+            text += f"#EXT-X-PROGRAM-DATE-TIME:{stamp((sequence + k) * length + shift)}\n"
+        text += f"#EXTINF:{length:.3f},live\n{name}\n"
+    text += "".join(f"{tag}{name}\n" for name in prefetch)
+    return text.encode()
+
+
 def drain(source, *, caught_up=False, reconnecting=False):
     """Every item from ``chunks()``, with adjacent byte blocks joined; `CaughtUp` markers
     (the helper's cue to report its live edge, no media) only with `caught_up`, and
@@ -3771,6 +3795,22 @@ video.m3u8
         routes["/live.m3u8"] = playlist
         return self.server(routes)
 
+    def made(self, copies, pieces):
+        """A server whose playlist stands as a live site's does while its pieces are made: its
+        copy k once k pieces being made (the names starting "p") have been sent (the last copy
+        from then on). Such a piece sends its last bytes as it ends, so a reload after two of
+        them finds the playlist two pieces on. `pieces` (names) have the test video."""
+        routes = {f"/{name}": (200, {}, self.video) for name in pieces}
+        server = None
+
+        def playlist(_request, _count):
+            sent = sum(n for path, n in server.counts.items() if path.startswith("/p"))
+            return 200, {}, copies[min(sent, len(copies) - 1)]
+
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        return server
+
     def run_for(self, server, seconds, **options):
         """`media` on the server's playlist, stopped after `seconds`."""
         stop = threading.Event()
@@ -3908,6 +3948,75 @@ video.m3u8
         server = self.copies(copies, names + ["p6.ts", "p7.ts", "p8.ts"])
         media(server.url + "/live.m3u8", live_delay=6.0)
         self.assertEqual(requested_segments(server), ["p6.ts", "p7.ts", "p8.ts"])
+
+    def relisted(self, copies):
+        """What a source makes of a live site's three `copies` (`made`: the third read after
+        the first's two pieces being made, p3 and p4) in 2.5 s: its items, the pieces asked
+        for and its log lines."""
+        names = ["s0.ts", "s1.ts", "s2.ts", "r3.ts", "r4.ts"]
+        server = self.made(copies, names + [f"p{k}.ts" for k in range(3, 7)])
+        with source_logs() as logs:
+            parts = self.run_for(server, 2.5)
+        return parts, server, logs
+
+    def test_a_prefetch_piece_relisted_under_another_name_is_ours(self):
+        # 2026-11-25: Twitch lists a piece being made finished in its next copy under another
+        # name (the same bytes), at the media sequence it was fetched at and dated as reckoned
+        # for it. That name was never fetched, so the copy read as another encoding's: the
+        # source waited 18 s of every ~22 s for ours. It is the piece already played, dated
+        # within half a piece of its reckoning or, undated, in a copy listing pieces being made.
+        for dates, shift in ((True, 0.0), (True, 0.8), (False, 0.0)):
+            with self.subTest(dates=dates, shift=shift):
+                copies = [
+                    site_playlist(0, ["s0.ts", "s1.ts", "s2.ts"], ["p3.ts", "p4.ts"], dates=dates),
+                    site_playlist(
+                        1, ["s1.ts", "s2.ts", "r3.ts"], ["p4.ts", "p5.ts"], dates=dates, shift=shift
+                    ),
+                    site_playlist(
+                        2, ["s2.ts", "r3.ts", "r4.ts"], ["p5.ts", "p6.ts"], dates=dates, shift=shift
+                    ),
+                ]
+                parts, server, logs = self.relisted(copies)
+                self.assertEqual([line for line in logs if "another encoding" in line], [])
+                pieces = ["p3.ts", "p4.ts", "p5.ts", "p6.ts"]
+                self.assertEqual(requested_segments(server), pieces)  # no r3 or r4, each once
+                self.assertEqual([server.counts[f"/{name}"] for name in pieces], [1, 1, 1, 1])
+                self.assertEqual(parts, joined(self.video, self.video, self.video, self.video))
+
+    def test_another_encoding_is_still_caught_on_a_prefetch_source(self):
+        # 2.6.1's two origin groups: a copy that lists, at the media sequence of the piece being
+        # made fetched last, a name never seen dated more than half a piece from its reckoning
+        # is another encoding's, as before; so is an undated one listing no piece being made.
+        others = ["x2.ts", "x3.ts", "x4.ts"]
+        for dates, other in (
+            (True, site_playlist(2, others, ["x5.ts", "x6.ts"], shift=1.5)),
+            (False, site_playlist(2, others, [], dates=False)),
+        ):
+            with self.subTest(dates=dates):
+                ours = site_playlist(
+                    0, ["s0.ts", "s1.ts", "s2.ts"], ["p3.ts", "p4.ts"], dates=dates
+                )
+                pieces = ["s0.ts", "s1.ts", "s2.ts", "p3.ts", "p4.ts"] + others + ["x5.ts", "x6.ts"]
+                server = self.made([ours, other], pieces)
+                with source_logs() as logs:
+                    self.run_for(server, 2.0)
+                waiting = "An HLS playlist copy numbers another encoding; waiting for ours."
+                self.assertIn(waiting, logs)
+                self.assertEqual(requested_segments(server), ["p3.ts", "p4.ts"])
+
+    def test_a_prefetch_piece_finished_under_its_own_name_plays_as_today(self):
+        # Kick's shape: 4.167 s pieces, its own prefetch lines, a piece listed finished under
+        # the name it was made under. Ours, as before: each piece once, nothing waited for.
+        kick = {"length": 4.167, "tag": "#EXT-X-PREFETCH:"}
+        copies = [
+            site_playlist(0, ["s0.ts", "s1.ts", "s2.ts"], ["p3.ts", "p4.ts"], **kick),
+            site_playlist(1, ["s1.ts", "s2.ts", "p3.ts"], ["p4.ts", "p5.ts"], **kick),
+            site_playlist(2, ["s2.ts", "p3.ts", "p4.ts"], ["p5.ts", "p6.ts"], **kick),
+        ]
+        parts, server, logs = self.relisted(copies)
+        self.assertEqual([line for line in logs if "another encoding" in line], [])
+        self.assertEqual(requested_segments(server), ["p3.ts", "p4.ts", "p5.ts", "p6.ts"])
+        self.assertEqual(parts, joined(self.video, self.video, self.video, self.video))
 
     def test_caught_up_comes_before_the_prefetch_fetches(self):
         # The start's backlog has landed once the finished pieces came: what follows comes as
@@ -4409,6 +4518,30 @@ video.m3u8
         self.assertEqual([piece.discontinuity for piece in first.segments][-2:], [True, False])
         server = self.copies(copies, finished + sorted(ads) + ["p5.ts", "p6.ts"])
         items = self.until(server, "p6.ts", live_delay=100.0)
+        self.assertEqual(requested_segments(server), finished + ["p5.ts", "p6.ts"])
+        self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()])
+
+    def test_twitch_ad_pieces_relisted_under_other_names_are_the_ones_skipped(self):
+        # I2's break, its pieces being made listed finished in the next copy under other names
+        # (2026-11-25: as Twitch relists the channel's own): the pieces already skipped, not
+        # another encoding's. The break is said once, and the pieces made after it play.
+        AdBreak = source_module.AdBreak
+        ads = {"p3.ts", "p4.ts", "r3.ts", "r4.ts"}
+        finished = ["s0.ts", "s1.ts", "s2.ts"]
+        copies = [
+            dated(0, finished, ads=ads, prefetch=["p3.ts", "p4.ts"]),
+            dated(
+                1,
+                finished[1:] + ["r3.ts", "r4.ts"],
+                ads=ads,
+                ranges={"r3.ts": ad_range(3, 2)},
+                prefetch=["p5.ts", "p6.ts"],
+            ),
+        ]
+        server = self.copies(copies, finished + sorted(ads) + ["p5.ts", "p6.ts"])
+        with source_logs() as logs:
+            items = self.until(server, "p6.ts", seconds=3.0, live_delay=100.0)
+        self.assertEqual([line for line in logs if "another encoding" in line], [])
         self.assertEqual(requested_segments(server), finished + ["p5.ts", "p6.ts"])
         self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()])
 
