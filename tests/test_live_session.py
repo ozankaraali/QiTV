@@ -9861,11 +9861,11 @@ class TimedStartTests(LiveSessionCase):
         feed.run(1.5)
         return feed.edge - feed.position, waited
 
-    def tune_at(self, latency, made, open_s, prefetching=True):
+    def tune_at(self, latency, made, open_s, prefetching=True, piece=2.0):
         self.start(latency=latency, channel="ch")
         self.engine.answer()
         sid = self.engine.last_sid
-        return piece_feed(self, sid, made=made, open_s=open_s, prefetching=prefetching)
+        return piece_feed(self, sid, made=made, open_s=open_s, piece=piece, prefetching=prefetching)
 
     def test_a_tune_lands_at_its_target_whatever_the_piece_being_made_held(self):
         # Eight phases of the piece being made at the tune, VLC's open 0.3 s (not measured
@@ -9916,6 +9916,27 @@ class TimedStartTests(LiveSessionCase):
                     self.assertLessEqual(sum(misses) / len(misses), 0.25)
                     self.assertEqual(feed.starved_s, 0.0)
                     self.assertTrue(self.live._stay.close)  # no wait read as the source's
+
+    def test_a_start_waits_for_the_next_keyframe_a_bounded_while_at_most(self):
+        # Keyframes 6 s apart (a channel whose pieces are longer than Kick's): a tune and Go
+        # live at phases whose next keyframe is further off than `_AIM_WAIT_S` open within it
+        # (then the start nearest the aim), never hang; VLC never runs dry.
+        bound = live_session._AIM_WAIT_S
+        self.live = self.make()
+        plays = len(self.playback.plays)
+        feed = self.tune_at(AUTO, 3.0, 0.3, piece=6.0)
+        _lag, waited = self.landing(feed, plays)
+        self.assertLessEqual(waited, bound + 0.5)
+        feed.run(20.0)
+        for phase in (1.5, 2.5, 3.5, 4.5, 5.5):
+            while abs(feed.edge % 6.0 - phase) > 1e-6:
+                feed.run(Feed.DT)
+            plays = len(self.playback.plays)
+            self.live.go_live()
+            _lag, waited = self.landing(feed, plays)
+            self.assertLessEqual(waited, bound + 0.3, f"phase {phase}")
+            feed.run(15.0)
+        self.assertEqual(feed.starved_s, 0.0)
 
     def test_the_aim_is_where_stay_lives_own_landing_ends(self):
         self.assertEqual(live_session._AIM_ABOVE_S, stay_live._CLOSE_LAND_S)
