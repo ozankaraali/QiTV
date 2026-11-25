@@ -1,3 +1,4 @@
+import contextlib
 import itertools
 import logging
 import math
@@ -212,6 +213,7 @@ class FakeEngine(QObject):
         prefetching=None,
         ad_break=None,
         dates=None,
+        piece=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -222,7 +224,8 @@ class FakeEngine(QObject):
         a video PID (left out when None, as an older helper does); `prefetching`: an HLS
         source reads its playlist's prefetch pieces as they are made, `ad_break`: it skips a
         live site's ad break now, `dates`: [timeline second, a piece's date less it] from where
-        each holds (each left out when None)."""
+        each holds, `piece`: the length of the pieces its playlist lists (each left out when
+        None)."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -250,6 +253,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["ad_break"] = ad_break
         if dates is not None:  # a dated source's dates on the timeline
             self._snapshots[sid]["dates"] = [list(entry) for entry in dates]
+        if piece is not None:  # an HLS source's piece length (its EXTINF)
+            self._snapshots[sid]["piece_s"] = piece
         if video is not None:
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
@@ -495,6 +500,7 @@ class Feed:
         self.restarts = self.steered = None  # 2.8.5: the helper's restart counts, if any
         self.ad_break = None  # the helper skips a live site's ad break (None: not said)
         self.prefetching = None  # a live site's prefetch pieces, read as made (None: not said)
+        self.piece = None  # the length of the pieces its playlist lists (None: not said)
         self.push()
 
     def push(self):
@@ -516,6 +522,7 @@ class Feed:
             steered=self.steered,
             ad_break=self.ad_break,
             prefetching=self.prefetching,
+            piece=self.piece,
         )
 
     def ready(self, backlog_after_start=True):
@@ -9819,15 +9826,24 @@ class PrefetchTargetTests(LiveSessionCase):
         self.assertTrue(self.live._stay.close and learned.close)
 
 
-def piece_feed(case, sid, *, made, open_s, piece=2.0, prefetching=True):
+def piece_feed(case, sid, *, made, open_s, piece=2.0, prefetching=True, said=True, stand=False):
     """A live site's tune as Kick's pieces come (2 s each, each beginning with a keyframe:
-    the feed's `gop`): what was made of the piece being made, `made` seconds, comes at once
-    in half-second states 20 ms apart (the first with the ready, as the helper says ready on
-    its first keyframe), then media at real time a quarter second at a time. VLC takes
-    `open_s` to play what it opens (its 300 ms caching; more on a slower computer)."""
+    the feed's `gop`; the state says their length unless not `said`): what was made of the
+    piece being made, `made` seconds, comes at once in half-second states 20 ms apart (the
+    first with the ready, as the helper says ready on its first keyframe), then media at real
+    time a quarter second at a time; with `stand`, the edge stands a quarter second more
+    where each piece ends and the next brings half a second at once. VLC takes `open_s` to
+    play what it opens (its 300 ms caching; more on a slower computer)."""
     feed = Feed(case, sid, burst=0.0, edge=min(made, 0.25), gop=piece, hls=True, open_s=open_s)
     feed.plays_seen = len(case.playback.plays)  # an earlier tune's play is not this one's
     feed.prefetching = prefetching
+    feed.piece = piece if said else None
+    if stand:  # from where `made` leaves the piece, a quarter second at a time
+        quarters = round(piece / 0.25)
+        sizes, gaps = [0.5] + [0.25] * (quarters - 2), [0.25] * (quarters - 2) + [0.5]
+        done = round((made - 0.5) / 0.25) + 1 if made >= 0.5 else 0
+        feed.sizes = itertools.islice(itertools.cycle(sizes), done, None)
+        feed.gaps = itertools.islice(itertools.cycle(gaps), done, None)
     feed.push()
     case.engine.sessionReady.emit(sid)
     while feed.edge < made - 1e-9:
@@ -9861,11 +9877,27 @@ class TimedStartTests(LiveSessionCase):
         feed.run(1.5)
         return feed.edge - feed.position, waited
 
-    def tune_at(self, latency, made, open_s, prefetching=True, piece=2.0):
+    def tune_at(self, latency, made, open_s, prefetching=True, piece=2.0, **kwargs):
         self.start(latency=latency, channel="ch")
         self.engine.answer()
         sid = self.engine.last_sid
-        return piece_feed(self, sid, made=made, open_s=open_s, piece=piece, prefetching=prefetching)
+        return piece_feed(
+            self, sid, made=made, open_s=open_s, piece=piece, prefetching=prefetching, **kwargs
+        )
+
+    def run_to(self, feed, piece, phase):
+        """Run until the edge is `phase` seconds into a piece (a reachable one)."""
+        for _ in range(round(4 * piece / Feed.DT)):
+            if abs(feed.edge % piece - phase) < 1e-6:
+                return
+            feed.run(Feed.DT)
+        self.fail(f"the edge never came {phase} s into a piece")
+
+    def today(self, timed):
+        """Today's start, picked at once (`_live_start`), where not `timed`: for comparison."""
+        if timed:
+            return contextlib.nullcontext()
+        return mock.patch.object(LiveSession, "_aiming", lambda self, build=False: False)
 
     def test_a_tune_lands_at_its_target_whatever_the_piece_being_made_held(self):
         # Eight phases of the piece being made at the tune, VLC's open 0.3 s (not measured
@@ -9916,6 +9948,92 @@ class TimedStartTests(LiveSessionCase):
                     self.assertLessEqual(sum(misses) / len(misses), 0.25)
                     self.assertEqual(feed.starved_s, 0.0)
                     self.assertTrue(self.live._stay.close)  # no wait read as the source's
+
+    def test_a_silence_while_a_start_waits_is_met_as_without_the_wait(self):
+        # Go live pressed at live where the start waits for the next keyframe (Auto, 2 s
+        # pieces), and the source then sends nothing for a second and a half: VLC runs dry no
+        # longer than under today's start at once, and Auto's learned target takes the silence
+        # in, rising most of the way today's does (review I1: the old picture ran dry 0.7 s and
+        # the target stayed at 1.0 s, where today's rose to 3 s). The wait gives way to the
+        # silence, today's start opens further back, and the batch after it tells the learned
+        # target what the picture at live would have had left (here: none, a starvation; today's
+        # picture, landed 1.8 s back, told two near-misses and rose to 2.99 s, this to 2.58 s).
+        results = {}
+        for timed in (True, False):
+            with self.subTest(timed=timed), self.today(timed):
+                self.live = self.make()
+                feed = self.tune_at(AUTO, 1.0, 0.3, stand=True)
+                self.landing(feed, 0)
+                feed.run(20.0)
+                self.run_to(feed, 2.0, 1.5)
+                starved = feed.starved_s
+                self.live.go_live()
+                feed.stalled = True
+                feed.run(1.5)
+                feed.stalled = False
+                feed.run(10.0)
+                results[timed] = (feed.starved_s - starved, self.timelines[-1]["target"])
+        (dry, target), (dry_today, target_today) = results[True], results[False]
+        self.assertLessEqual(dry, dry_today + 0.05)
+        self.assertGreater(target_today, 2.0)  # (today's start does take it in)
+        self.assertGreaterEqual(target - 1.0, 0.75 * (target_today - 1.0))
+
+    def test_go_live_on_longer_pieces_lands_no_further_back_than_today(self):
+        # Pieces of 3.5 and 4 s, the edge standing a quarter second where each ends: at every
+        # phase Go live lands no further back than today's start at once (but for a quarter
+        # second, a state's), and nearer the target where the next keyframe comes in time
+        # (review I2: once it waited out its bound, 3.95 s against today's 1.45 s, 4.45
+        # against 1.95 s).
+        for piece in (3.5, 4.0):
+            # (a piece's first half second comes at once: a quarter second in is never seen)
+            phases = [0.0] + [round(0.25 * k, 2) for k in range(2, round(piece / 0.25))]
+            landings = {}
+            for timed in (True, False):
+                with self.today(timed):
+                    self.live = self.make()
+                    feed = self.tune_at(AUTO, 1.0, 0.3, piece=piece, stand=True)
+                    self.landing(feed, 0)
+                    feed.run(20.0)
+                    landings[timed] = []
+                    for phase in phases:
+                        self.run_to(feed, piece, phase)
+                        plays = len(self.playback.plays)
+                        self.live.go_live()
+                        landings[timed].append(self.landing(feed, plays)[0])
+                        feed.run(12.0)
+            for phase, lag, today in zip(phases, landings[True], landings[False]):
+                with self.subTest(piece=piece, phase=phase):
+                    self.assertLessEqual(lag, max(today + 0.25, 1.0 + 0.55))
+
+    def test_a_tune_on_long_or_unsaid_pieces_lands_no_further_back_than_today(self):
+        # Pieces of 6 s (the next keyframe further off than a start waits, but where the
+        # piece held 5 s already), and 2 s pieces whose length the state does not say (nor any
+        # closed segment yet): the tune takes today's start once what the first piece held has
+        # landed (a state or two later), never waits out its bound, and lands no further back
+        # than today's but for that (review I2: 3.95 s against today's 1.2 s, 5.7 against
+        # 3.2 s); where the keyframe comes in time it waits for it and lands near the target.
+        # (piece, made at the tune, the length said, the next keyframe comes in time)
+        cases = (
+            (6.0, 1.0, True, False),
+            (6.0, 3.0, True, False),
+            (6.0, 5.0, True, True),
+            (2.0, 1.0, False, False),
+        )
+        for piece, made, said, in_time in cases:
+            landings = {}
+            for timed in (True, False):
+                with self.today(timed):
+                    self.live = self.make()
+                    feed = self.tune_at(AUTO, made, 0.3, piece=piece, said=said)
+                    landings[timed] = self.landing(feed, 0)
+            with self.subTest(piece=piece, made=made, said=said):
+                (lag, waited), (today, _) = landings[True], landings[False]
+                self.assertLessEqual(lag, today + 0.35)
+                if in_time:  # it waits for that keyframe, and lands nearer the target
+                    self.assertLessEqual(lag, 1.0 + 0.55)
+                    self.assertLessEqual(waited, live_session._AIM_WAIT_S + 0.5)
+                else:  # today's start, once what the first piece held landed
+                    self.assertLessEqual(waited, 0.75)
 
     def test_a_start_waits_for_the_next_keyframe_a_bounded_while_at_most(self):
         # Keyframes 6 s apart (a channel whose pieces are longer than Kick's): a tune and Go

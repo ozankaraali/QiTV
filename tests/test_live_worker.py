@@ -72,6 +72,7 @@ STATE_KEYS = {
     "settled_s",  # 2.8.11
     "retry_at",  # the channel's stream down: when its next try is due
     "prefetching",  # HLS: its playlist's prefetch pieces are read as they are made
+    "piece_s",  # HLS: the last segment's EXTINF (a live site's piece length)
     "ad_break",  # HLS: a live site's ad break is skipped now
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
@@ -612,6 +613,7 @@ class LiveWorkerTests(unittest.TestCase):
         helper.wait_for(lambda message: message == ("ready", sid))
         snapshot = helper.of(sid, "state")[-1][2]
         self.assertEqual((snapshot["prefetching"], snapshot["burst_s"]), (True, 0.0))
+        self.assertEqual(snapshot["piece_s"], 4.0)  # the piece being made: as the last listed
         self.assertIs(snapshot["hls"], True)
         self.assertIs(snapshot["caught_up"], True)  # before the prefetch piece came
         self.assertEqual(source.counts["/user/secret/a.ts"], 0)  # it starts at that piece

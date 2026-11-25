@@ -610,6 +610,7 @@ class _Session:
         self._settled = 0.0
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
+        self._piece_s = 0.0  # HLS: the last segment's EXTINF (a live site's piece length)
         self._pending: list[_Addition] = []
         # 2.8: one state at a time (the session thread's, and another thread's after it changed
         # the ring: `notify_soon`), and each span goes once: the newest seq a state carried.
@@ -1586,6 +1587,8 @@ class _Session:
             return
         self._media_next = getattr(source, "segment_sequence", None)
         fetching = getattr(source, "segment_s", None)
+        if isinstance(fetching, float) and fetching > 0:
+            self._piece_s = fetching
         if self._clock_joiner is not None and isinstance(fetching, float):
             self._clock_joiner.arrive(fetching)
         edge = self._live_edge()
@@ -1709,6 +1712,10 @@ class _Session:
             # HLS: its playlist lists prefetch pieces (a live site's newest), read as they are
             # made: the parent starts it as a steady source.
             "prefetching": prefetching,
+            # HLS: the EXTINF of the segment fetched last (0.0 before one): a live site's piece
+            # length, where its next keyframe is due before the first piece closed (2026-11-25:
+            # each of Kick's and Twitch's pieces begins with one; the parent times its start).
+            "piece_s": self._piece_s,
             # HLS: a live site's ad break is skipped now (its pieces never fetched): no media
             # comes until the channel's next piece, and no starvation is counted meanwhile.
             "ad_break": self._ad_break,
