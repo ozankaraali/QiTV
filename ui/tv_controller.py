@@ -2787,6 +2787,13 @@ class TVController(QObject):
             # in the background; a file or the audio screen gives way); nothing plays meanwhile.
             self._before_new_target(target, delivered=True)
             self._set_recording_aside()
+            if self._media is not None and not self._plays_small(self._media.active_url()):
+                self._media.stopped()  # 2.8: a server's title stopped where it was
+            try:
+                self.watch.flush()  # a film's last position
+            except Exception as e:
+                self._log_failure("save the watch state", e)
+            self.overlays.transport.dismiss()
             self._live_controls.new_target()
         self._live_controls.wait_for_live(target, message if is_offline(message) else "")
         self._current, self._cid = target, None

@@ -5647,6 +5647,20 @@ class InterruptionTests(LiveSessionCase):
         self.engine.sessionUpdated.emit(sid, dict(self.engine._snapshots[sid], ad_break=False))
         self.assertEqual(self.engine.closed, [])  # (a state: the RAM ring's, it goes on)
 
+    def test_the_helper_starts_back_by_the_captions_floor(self):
+        # Task 9 M6: a tune with AI captions on (their floor known from the channel before)
+        # asks the helper for a start that far back at least, never Stable's 6 s alone.
+        for floor in (0.0, 8.0):
+            with self.subTest(floor=floor):
+                self.live = self.make()
+                self.live.set_caption_floor(floor)
+                self.start(latency="stable")
+                target = self.engine.opened[-1][2]["target"]
+                if floor:
+                    self.assertGreaterEqual(target, floor)
+                else:
+                    self.assertEqual(target, live_session.start_target("stable"))
+
     def test_a_pause_does_not_extend_the_disk_deferral(self):
         self.live = self.make(ready_timeout_ms=1000)
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -10392,6 +10406,46 @@ class ComeBackTests(LiveSessionCase):
         self.assertGreaterEqual(self.live.position(), stood - 1e-6)
         self.assertLessEqual(lag, self.timelines[-1]["target"] + 0.6)
         self.assertEqual(len(self.playback.plays), plays + 1)
+
+    spy = LearnedTargetTests.spy
+
+    def test_after_a_twitch_ad_break_a_close_source_plays_its_newest_at_its_target(self):
+        # Under Low and Auto on a live site's pieces as made: VLC is held through the break and
+        # until the timed start of what came after it opens, at its target; the learned target
+        # hears nothing of the break, nor of VLC filling up after it.
+        starved = self.spy(LearnedTarget, "starved")
+        stalled = self.spy(LearnedTarget, "stalled")
+        near = self.spy(LearnedTarget, "near_miss")
+        for latency in ("low", AUTO):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                feed = self.tune_at(latency, 1.0, 0.3)
+                self.landing(feed, 0)
+                feed.run(30.0)
+                target = self.timelines[-1]["target"]
+                counts = (starved.call_count, stalled.call_count, near.call_count)
+                AdBreakTests.begin(feed)
+                feed.run(20.0)
+                stood, waited = feed.edge, feed.position
+                plays = len(self.playback.plays)
+                AdBreakTests.end(feed)
+                spent = 0.0
+                while len(self.playback.plays) == plays:
+                    self.assertEqual(feed.position, waited)  # held, never played on
+                    self.assertLess(spent, 3.5, "no start opened")
+                    feed.run(Feed.DT)
+                    spent += Feed.DT
+                self.assertGreaterEqual(self.live.position(), stood - 1e-6)
+                feed.run(3.0)
+                lag = feed.edge - feed.position
+                self.assertGreaterEqual(lag, target - 0.3)
+                self.assertLessEqual(lag, target + 0.6)
+                feed.run(20.0)
+                self.assertEqual((starved.call_count, stalled.call_count), counts[:2])
+                nears = near.call_args_list[counts[2] :]
+                self.assertEqual([c for c in nears if c.args[1] < learned_target.NEAR_S], [])
+                self.assertEqual(self.timelines[-1]["target"], target)
+                self.assertEqual(len(self.playback.plays), plays + 1)
 
     def test_a_short_hiccup_and_a_paused_viewer_are_as_ever(self):
         for paused in (False, True):

@@ -1221,6 +1221,38 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertTrue(all(gap >= 0.25 for gap in gaps), gaps)  # never in a burst
         self.assertEqual(self.errors(), [])
 
+    def test_a_film_left_for_a_channel_that_isnt_live_keeps_where_it_stopped(self):
+        # The wait takes the large picture as a delivered link would: the film's last place is
+        # saved and its transport goes.
+        self.calm(30.0)
+        self.link(FILM_URL, FILM)
+        self.plays_now()
+        self.session.positionChanged.emit(125_000, 6_000_000)
+        cid = f"{NETWORK_PROVIDER}:movie:{stream_id(FILM_URL)}"
+        flushes = self.watch.flushes
+        self.answers = [SiteError("offline")]
+        self.player.play(KICK_PAGE, LIVE)
+        self.assertTrue(wait_until(lambda: self.pill_text() is not None))
+        self.assertEqual(self.watch.positions[-1], (cid, 125_000, 6_000_000))
+        self.assertGreater(self.watch.flushes, flushes)
+        self.assertFalse(self.controller.overlays.transport.isVisible())
+
+    def test_an_older_builds_row_plays_and_opens_as_one(self):
+        # Ask 3 through the player: a Twitch row an older build kept without "www." (its id is
+        # not its page's) plays from its row and by Open Link under another spelling, as one.
+        page = "https://twitch.tv/otherchannel"
+        with mock.patch.object(ns, "site_page", lambda url: None):
+            old = stream_id(page)
+        self.assertNotEqual(old, stream_id(page))
+        row = {"id": old, "name": "otherchannel · Twitch", "url": page, "kind": "LIVE"}
+        self.store.load(json.dumps({"v": 1, "entries": [row]}).encode())
+        self.answers = [MASTER_OTHER, MASTER_OTHER]
+        self.opens(lambda: self.player.play_kept(old))
+        self.plays_now()
+        self.opens(lambda: self.player.play("https://www.twitch.tv/OtherChannel", LIVE))
+        self.plays_now()
+        self.assertEqual([e.id for e in self.store.entries()], [old])
+
     def test_the_wait_ends_when_another_is_chosen(self):
         self.calm()
         self.answers = [SiteError("offline")]

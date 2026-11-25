@@ -4168,8 +4168,10 @@ class LiveSession(QObject):
         if over is None:
             return False
         held = self._held is not None and self._ad_held
-        # (Until the channel's first bytes after it came, VLC may run dry any moment.)
-        waiting = held or self._edge_moved <= over or self._starved(snapshot, position)
+        # (Until the channel's first bytes after it came, VLC may run dry any moment; the start
+        # of what came after it, opened at its newest, still opens: `_comes_back`.)
+        opening = self._playback.state() is not PlaybackState.PLAYING
+        waiting = held or self._edge_moved <= over or opening or self._starved(snapshot, position)
         if waiting and self._clock() - over < _AD_AFTER_S:
             return True
         self._ad_over, self._ad_held = None, False
@@ -4242,7 +4244,7 @@ class LiveSession(QObject):
             pick[1],
             self._aim(snapshot),
         )
-        self._ad_over, self._ad_held = None, False
+        # (After a break, `_sits_out` goes on sitting out until VLC plays with media ahead.)
         if not self._open_at(pick[0]):
             self._retry = _Retry.REOPEN  # (the tick tries again, as stay-live's reopen)
             return True
