@@ -1833,6 +1833,41 @@ class SitePipTests(PipCase):
             raise answer
         return live_sites.Resolved(answer, f"{page.channel} · Kick")
 
+    def test_a_site_channel_not_live_small_waits_and_opens_once_live(self):
+        # 2.15 (parity with the large picture): nothing opens small and no stream is held; it
+        # says so once; its site is asked again calmly; it opens small once it is live.
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_ASK_S", 0.2))
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_JITTER_S", 0.0))
+        offline = live_sites.SiteError("offline")
+        self.answers = [offline, offline, self.MASTER]
+        self.start_large(0)
+        holders = sorted(self.budget.holders(NETWORK_PROVIDER))
+        self.controller.open_pip(self.kept, group_key=RECENT_GROUP, channels=[self.kept])
+        self.assertTrue(wait_until(lambda: self.asked == 1))
+        pause(50)
+        small = self.sessions.other()
+        self.assertEqual(small.live.named("start"), [])  # nothing opened small
+        self.assertEqual(sorted(self.budget.holders(NETWORK_PROVIDER)), holders)
+        said = [(text, kind) for text, kind in self.toast.messages()]
+        waits = "examplechannel isn't live now · It plays as soon as it's live"
+        self.assertEqual(said, [(waits, "info")])
+        self.assertTrue(wait_until(lambda: self.asked == 2, timeout_ms=3000))
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 1, timeout_ms=3000))
+        self.assertEqual(small.live.named("start")[0][0], self.MASTER)
+        self.assertEqual(self.asked, 3)
+        self.assertEqual(self.toast.messages(), said)  # said once, never an error
+
+    def test_a_small_wait_ends_when_the_small_picture_closes(self):
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_ASK_S", 0.2))
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_JITTER_S", 0.0))
+        self.answers = [live_sites.SiteError("offline")]
+        self.start_large(0)
+        self.controller.open_pip(self.kept, group_key=RECENT_GROUP, channels=[self.kept])
+        self.assertTrue(wait_until(lambda: self.asked == 1))
+        self.controller._pip.close()
+        pause(400)
+        self.assertEqual(self.asked, 1)  # asked no more
+
     def open_page_small(self):
         self.start_large(0)
         self.controller.open_pip(self.kept, group_key=RECENT_GROUP, channels=[self.kept])

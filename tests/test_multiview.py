@@ -1874,7 +1874,33 @@ class SiteTileTests(MultiviewCase):
 
     def resolve(self, page, stop=None, **_kwargs):
         self.asked += 1
-        return live_sites.Resolved(self.answers.pop(0), f"{page.channel} · Twitch")
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return live_sites.Resolved(answer, f"{page.channel} · Twitch")
+
+    def test_a_site_tile_that_is_not_live_waits_in_its_tile_and_plays_once_live(self):
+        # 2.15 (parity with the large picture): its card says it waits, its site is asked
+        # again calmly, no error is said, nothing holds a stream, and it plays once live.
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_ASK_S", 0.2))
+        self.enterContext(mock.patch("ui.live_controls.OFFLINE_JITTER_S", 0.0))
+        offline = live_sites.SiteError("offline")
+        self.answers = [offline, offline, self.MASTER]
+        self.start_large(0)
+        self.v()
+        holders = sorted(self.budget.holders(NETWORK_PROVIDER))
+        self.controller.play_in_tile("t3", self.kept)
+        self.assertTrue(wait_until(lambda: self.grid.state("t3") == FAILED))
+        _title, detail = self.grid.label("t3")
+        self.assertEqual(detail, "examplechannel isn't live now · It plays as soon as it's live")
+        self.assertEqual(sorted(self.budget.holders(NETWORK_PROVIDER)), holders)  # none held
+        self.assertTrue(wait_until(lambda: self.asked == 2, timeout_ms=3000))  # asked calmly again
+        self.assertEqual(self.grid.label("t3")[1], detail)
+        t3 = self.sessions.slot("t3")
+        self.plays(t3, self.MASTER)  # live now: it plays in its tile
+        self.assertEqual(self.asked, 3)
+        errors = [text for text, kind in self.toast.messages() if kind == "error"]
+        self.assertEqual(errors, [])
 
     def plays(self, slot, url):
         self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == url))

@@ -2861,12 +2861,20 @@ class TVController(QObject):
         that tile says so too."""
         if self._closed:
             return
+        # 2.15: a tile or the small picture whose site channel isn't live waits for it (as the
+        # large picture's): no error toast; its row counts it once, as it begins to wait.
+        waits: list[Optional[bool]] = []
         for name, waiting in list(self._tile_links.items()):
             if waiting is target:
                 del self._tile_links[name]
                 if self._grid is not None:
-                    self._grid.link_failed(name, target.item)
-        self._menu_error(self._own_words(message) or self._named(target.title, message))
+                    waits.append(self._grid.link_failed(name, target.item, message))
+        if self._pip is not None:
+            waits.append(self._pip.offline(target, message))
+        if False in waits:
+            return  # it waits on: said and counted once already
+        if True not in waits:
+            self._menu_error(self._own_words(message) or self._named(target.title, message))
         page = self._site_link(target.item)
         if page is not None and is_site_failure(message):
             # Its site gave no stream (for the PiP, a tile, an outside player, the phone):

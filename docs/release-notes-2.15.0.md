@@ -2,7 +2,8 @@
 
 QiTV 2.15.0 plays Kick and Twitch channels: paste a channel's page link and it plays live, at its
 best quality, about a second behind the broadcaster, with Twitch's ad breaks skipped. Pause,
-rewind, recordings and AI captions work on them as on any live channel. Ctrl/⌘+N opens Open
+rewind, recordings and AI captions work on them as on any live channel, and rewind reaches back
+to the start of the broadcast. Their videos and clips play as films. Ctrl/⌘+N opens Open
 Link…, and on Windows the picture's right-click menu stays open.
 
 **Download QiTV from [qitv.app](https://qitv.app), which picks the right build for your
@@ -24,18 +25,19 @@ others' distributions, which may have malware.**
 - **How far behind, in the statistics.** <kbd>Shift+I</kbd> (or the Picture panel's
   **Statistics**) shows **Behind the broadcaster**: the seconds between the moment the site
   stamped on the picture and now.
-- **Twitch's ad breaks are skipped.** When a Twitch channel's ads come, QiTV leaves them out and
-  shows "Ad break skipped"; the picture waits for the channel, then plays from its newest
-  moment. A break that goes on much longer than usual is waited for instead of freezing.
+- **Twitch's ad breaks are skipped,** by the markers Twitch puts in the stream: QiTV leaves the
+  marked pieces out and shows "Ad break skipped", then plays the channel from its newest moment.
 - **Back at the newest moment.** When the stream comes back after a drop, a restart or an ad
   break, the channel plays from its newest moment, not from where the picture stopped.
 - **A channel that isn't live waits for it.** Opened while the streamer is off, or when the
   stream ends while you watch, the channel waits on screen: "channel isn't live now · It plays
   as soon as it's live". QiTV asks the site again about every half a minute, and the channel
-  plays as soon as it's live. **Try now** asks at once.
+  plays as soon as it's live. **Try now** asks at once. A multiview tile waits the same way, and
+  so does picture-in-picture (it says so once and opens when the channel is live).
 - **Asked afresh each time.** A page's stream address changes, so QiTV asks the site again
   whenever you play the channel, and again each time the stream drops or its address runs out,
-  waiting a little longer each time it keeps failing, in picture-in-picture and multiview too.
+  without a message, waiting a little longer each time it keeps failing, in picture-in-picture
+  and multiview too.
   When QiTV asks again after a drop, the pause and rewind buffer starts over. Nothing the site
   gives QiTV is kept or written to the log: only the site, the channel and what happened.
 - **In Network streams** the page is kept, named "channel · Kick" or "channel · Twitch", and
@@ -44,6 +46,23 @@ others' distributions, which may have malware.**
 - **When it doesn't play, it says why:** "No channel named channel on Kick", or "Kick refused
   QiTV's request: try again later, or paste the stream link".
 - **In your language.** The new words are in all 46 languages.
+
+## Videos, clips and rewind
+
+- **A video or clip plays as a film.** Paste a video's link (`twitch.tv/videos/…`,
+  `kick.com/<channel>/videos/…`, `kick.com/video/…`) or a clip's (`clips.twitch.tv/…`,
+  `twitch.tv/<channel>/clip/…`, `kick.com/<channel>/clips/…`, or a channel page with
+  `?clip=…`): QiTV says "A film" and plays it at its source quality. You can seek anywhere,
+  and it resumes where you stopped. It's kept in Network streams under its title, as
+  "title · Twitch". A video still being recorded plays as far as the site lists it when you open
+  it. A video that's gone says "This video is gone from Twitch"; one that's private or for
+  subscribers only says so too.
+- **Rewind back to the start of the broadcast.** When a Kick or Twitch channel keeps its past
+  broadcasts, the time-shift bar reaches back to the start of the one running now. Rewind past
+  what QiTV buffered and you watch the site's own recording of it. Play forward (at 2× too) and
+  it runs on into QiTV's buffer and up to live as one stream, with nothing reloading at the join.
+  **Go live** (<kbd>L</kbd>) comes back to live as usual. A channel that keeps no past
+  broadcasts rewinds as far as QiTV's buffer, as before.
 
 ## Also in 2.15.0
 

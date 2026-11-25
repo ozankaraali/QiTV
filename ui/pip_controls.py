@@ -52,6 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import logging
+import random
 import time
 from typing import Any, Callable, Optional
 
@@ -63,6 +64,7 @@ from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
+from services.network_streams import is_offline, shown_reason
 from services.revive import revive_wait
 from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
@@ -73,7 +75,7 @@ from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
 from ui.overlays.pip_label import CONNECTING, LIVE, REC
-from ui.overlays.retry_notice import retry_text
+from ui.overlays.retry_notice import retry_text, waiting_text
 from ui.overlays.transport import fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -241,6 +243,10 @@ class PipControls(QObject):
         self._relink_due: Optional[SlotView] = None
         self._relink_timer = QTimer(self, singleShot=True)
         self._relink_timer.timeout.connect(self._relink_now)
+        # 2.15: the small picture's site channel that isn't live now, waited for (`offline`)
+        self._offline: Optional[Target] = None
+        self._offline_timer = QTimer(self, singleShot=True)
+        self._offline_timer.timeout.connect(self._ask_offline_again)
         self._label_timer = QTimer(self, interval=live_controls.RETRY_TICK_MS)
         self._label_timer.timeout.connect(self._tick_label)
 
@@ -621,6 +627,8 @@ class PipControls(QObject):
             self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
+        self._offline = None  # 2.15: a wait for its channel to be live ends
+        self._offline_timer.stop()
         self._cancel_reopen()
         self._cancel_relink()
         sessions = self.sessions
@@ -678,10 +686,52 @@ class PipControls(QObject):
         self._link = target
         self._lanes.request_side(target, lambda url: self._on_link(target, url), play=False)
 
+    def offline(self, target: Target, message: str) -> Optional[bool]:
+        """2.15, as the large picture's: the link asked for the small picture, a site's
+        channel whose site says it isn't live now, waits: nothing opens (no stream is held),
+        it says so once ("… isn't live now · It plays as soon as it's live"), its site is
+        asked again after `OFFLINE_ASK_S` and a jitter (each ask once the last answered), and
+        it opens small from its newest once it is live, unless another channel is chosen
+        small or the small picture is closed meanwhile. True when it begins to wait (the
+        shell counts it in its row; nothing more is said), False when it waits on, None for
+        any other failure (the shell says it)."""
+        wanted = self._wanted
+        if (
+            target is not self._link
+            or wanted is None
+            or wanted[0] is not target
+            or self._site_page(target.item) is None
+            or not is_offline(message)
+        ):
+            return None
+        waiting = self._offline
+        first = waiting is None or not ZapContext.same(waiting.item, target.item)
+        self._offline = target
+        wait = live_controls.OFFLINE_ASK_S + random.uniform(0.0, live_controls.OFFLINE_JITTER_S)
+        logger.info(
+            "%s is not live now (small); its site is asked again in %.0f s", target.title, wait
+        )
+        self._offline_timer.start(round(wait * 1000))
+        if first:
+            self._toast(waiting_text(shown_reason(message)), "info", NOTICE_MS)
+        return first
+
+    def _ask_offline_again(self) -> None:
+        target, wanted = self._offline, self._wanted
+        if target is None or self._closed() or wanted is None or wanted[0] is not target:
+            self._offline = None  # another channel was chosen small, or it was closed
+            return
+        if self._link is not None:
+            return  # (a newer ask is on its way)
+        logger.info("Asking the site of %s whether it is live now (small)", target.title)
+        self._request(target)
+
     def _on_link(self, target: Target, url: str) -> None:
         if target is not self._link:
             return
         self._link = None
+        self._offline = None  # (2.15: a wait for it is over: it came)
+        self._offline_timer.stop()
         wanted = self._wanted
         if self._closed() or wanted is None:
             return  # closed meanwhile
@@ -711,6 +761,8 @@ class PipControls(QObject):
             return
         self._link = None
         wanted = self._wanted
+        if target is self._offline and wanted is not None and wanted[0] is target:
+            return  # 2.15: it waits for its channel to be live (`offline`)
         if wanted is not None and wanted[0] is target:
             self._wanted = None
         elif wanted is not None:

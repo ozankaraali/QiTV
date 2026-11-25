@@ -78,6 +78,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 import logging
+import random
 import time
 from typing import Any, Callable, Optional
 
@@ -88,6 +89,7 @@ from services.config_manager import ConfigManager
 from services.i18n import N_, tr, translate
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import TARGETS
+from services.network_streams import is_offline, shown_reason
 from services.provider_ids import with_provider
 from services.redact import safe_message
 from services.revive import Revive
@@ -99,7 +101,7 @@ from ui.keymap import Action
 from ui.overlays.grid_tiles import DENIED, EMPTY, FAILED, OPENING, PLAYING, TileView
 from ui.overlays.layout_row import LayoutChoice
 from ui.overlays.pip_label import CONNECTING, LIVE, REC
-from ui.overlays.retry_notice import ended_text, retry_text
+from ui.overlays.retry_notice import ended_text, retry_text, waiting_text
 from ui.overlays.transport import MINUS, fmt_behind
 
 logger = logging.getLogger(__name__)
@@ -268,6 +270,9 @@ class GridControls(QObject):
         self._first_played: dict[str, float] = {}  # each tile's first since it opened there
         self._revives: dict[str, tuple[dict, Revive]] = {}
         self._revive_due: dict[str, float] = {}  # monotonic
+        # 2.15: the tiles whose site channel isn't live now: they wait, their site asked
+        # again calmly (`link_failed`), their card saying so
+        self._offline: dict[str, dict] = {}  # tile name: its channel
         self._revive_timer = QTimer(self, interval=_REVIVE_TICK_MS)
         self._revive_timer.timeout.connect(self._tick_revives)
 
@@ -855,7 +860,8 @@ class GridControls(QObject):
         the grid, or its player could not be made (said); nothing should be asked for."""
         if not self._shown or name not in self._names or self._ensure_slot(name) is None:
             return False
-        self._cards.pop(name, None)
+        if not self._waits(name, channel):  # (2.15: its site asked again: it still waits)
+            self._cards.pop(name, None)
         self._stop(name)
         self._linking[name] = channel
         self._refresh()
@@ -865,14 +871,41 @@ class GridControls(QObject):
         """Tile `name` is still in the grid and waits for `channel`'s link (`linking`)."""
         return self._shown and name in self._names and self._linking.get(name) is channel
 
-    def link_failed(self, name: str, channel: dict) -> None:
-        """Tile `name`'s link never came: it says so (a click tries again)."""
+    def link_failed(self, name: str, channel: dict, message: str = "") -> Optional[bool]:
+        """Tile `name`'s link never came: it says so (a click tries again). 2.15, as the large
+        picture's: a site's channel whose site says it isn't live now waits in its tile, its
+        card saying so; its site is asked again after `OFFLINE_ASK_S` and a jitter (each ask
+        once the last answered), and it plays from its newest once it is live; nothing of it
+        holds a stream meanwhile. True when it begins to wait so, False when it waits on (the
+        shell toasts nothing for either, and counts it in its row once), None otherwise."""
         if self._linking.get(name) is not channel:
-            return
+            return None
         del self._linking[name]
-        if self._shown and name in self._names:
-            self._cards[name] = _Card(FAILED, channel, translate(TILE_FAILED))
+        if not (self._shown and name in self._names):
+            return None
+        if self._site_page(channel) is not None and is_offline(message):
+            first = not self._waits(name, channel)
+            self._offline[name] = channel
+            self._cards[name] = _Card(FAILED, channel, waiting_text(shown_reason(message)))
+            wait = live_controls.OFFLINE_ASK_S + random.uniform(0.0, live_controls.OFFLINE_JITTER_S)
+            logger.info("A tile's channel is not live now; its site is asked again in %.0f s", wait)
+            self._revive_due[name] = time.monotonic() + wait
+            self._follow_revives()
             self._refresh()
+            return first
+        self._offline.pop(name, None)
+        self._cards[name] = _Card(FAILED, channel, translate(TILE_FAILED))
+        self._refresh()
+        return None
+
+    def _waits(self, name: str, channel: Optional[dict] = None) -> bool:
+        """Tile `name` waits for its site channel (`channel`, else the one its card shows) to
+        be live (2.15, `link_failed`)."""
+        waiting = self._offline.get(name)
+        card = self._cards.get(name)
+        if waiting is None or card is None or not ZapContext.same(card.channel, waiting):
+            return False
+        return channel is None or ZapContext.same(waiting, channel)
 
     def label(self, name: str) -> tuple[str, str]:
         """What tile `name`'s label (or card) says: the channel's name, and LIVE, "−MM:SS"
@@ -880,6 +913,8 @@ class GridControls(QObject):
         card = self._cards.get(name)
         if card is not None:
             due = self._revive_due.get(name)
+            if self._waits(name):  # 2.15: its site channel waits to be live
+                return self._title(name), card.detail
             if due is not None:  # it opens again by itself: when
                 return self._title(name), ended_text(due - time.monotonic())
             return self._title(name), card.detail
@@ -972,6 +1007,7 @@ class GridControls(QObject):
     def _on_slot_state(self, name: str, open_: bool) -> None:
         if open_:
             self._cards.pop(name, None)
+            self._offline.pop(name, None)
             self._revive_due.pop(name, None)
             if not ZapContext.same(self._played.get(name), self._tile_channel(name)):
                 self._played.pop(name, None)  # another channel: it has to play to come back
