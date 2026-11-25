@@ -319,6 +319,29 @@ class TypingTests(PhoneCase):
         label = "Search movies, series and channels"
         self.assertEqual((shown["label"], "quiet" in shown), (label, False))
 
+    def test_go_with_nothing_typed_presses_nothing_where_typing_would_start(self):
+        """Review 1 (batch 3): Go into the Library's quiet search with nothing in it would
+        press Enter on the highlighted poster: none; typed into the channel list's quiet find,
+        the find it opened has the keys, and Go is Enter there."""
+        self.show()
+        self.wait_for_drawer()
+        self.connect()
+        window, remote = self.window, self.window.remote
+        with mock.patch.object(remote, "_press") as press:
+            remote._push_state()
+            find = self.fields()[-1]
+            remote._on_event(Typed("s8", find["id"], "Channel 2", True))
+            press.assert_called_once_with("ok")
+        window.screens.open_library("movies")
+        self.assertTrue(wait_until(window.screens.library_shown))
+        with mock.patch.object(remote, "_press") as press:
+            remote._push_state()
+            search = self.fields()[-1]
+            self.assertTrue(search["quiet"])
+            remote._on_event(Typed("s8", search["id"], "", True))
+            press.assert_not_called()
+        self.assertEqual(window.library_controller.mode == "search", False)
+
     def test_a_question_over_the_box_has_the_keys(self):
         self.show()
         self.wait_for_drawer()
@@ -519,12 +542,11 @@ class SiteWaitTests(PhoneCase):
         self.assertTrue(remote._waits.waiting("d8"))
         remote._push_state()
         self.assertTrue(remote._waits.waiting("d8"))  # the TV as it was: it waits on
-        other = Target({"name": "Channel 2", "cmd": "http://p.test/two.m3u8"}, "live", "Two")
-        with (
-            mock.patch.object(controller, "now_playing", return_value=other),
-            mock.patch.object(controller, "showing_here", return_value=True),
-        ):
-            remote._push_state()
+        with mock.patch.object(controller, "showing_here", return_value=True):
+            remote._push_state()  # the TV's own stream back (a reconnect): nothing new
+        self.assertTrue(remote._waits.waiting("d8"))
+        controller._lanes.supersede()  # the TV's newer choice (a tune, a film, Stop)
+        remote._push_state()
         self.assertFalse(remote._waits.waiting("d8"))
         self.assertEqual(self.sent("stop"), [{"t": "stop"}])
         asks = len(self.asks)
@@ -550,7 +572,8 @@ class SiteWaitTests(PhoneCase):
         self.answers = [OFFLINE, OFFLINE]
         self.watch("s8")
         self.watch("s9")
-        self.assertEqual(self.heard, [True, True])
+        self.assertEqual(self.heard, [True, False])  # its row counts the channel once
+        self.assertEqual(len(self.sent("play", "s9")), 1)  # the joiner is told it waits too
         [wait] = remote._waits.waits()
         self.assertEqual(wait.devices, ["d8", "d9"])
         self.answers = [OFFLINE, "https://edge.example/live.m3u8?token=sentinel"]
@@ -579,6 +602,41 @@ class SiteWaitTests(PhoneCase):
         asks = len(self.asks)
         pause(400)
         self.assertEqual(len(self.asks), asks)
+
+    def test_the_tv_taking_over_as_the_link_comes_hands_nothing_on(self):
+        """Review 2 (batch 3): the TV made a newer choice since the wait's ask went: its link,
+        coming within the half second before the next look, is not handed on (it would tear
+        the TV's new picture down); the wait ends, the phone hears the TV took over."""
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.answers = [OFFLINE]
+        self.watch()
+        self.assertTrue(wait_until(lambda: len(self.asks) == 2, timeout_ms=3000))  # unanswered
+        ask = self.asks[-1][1]
+        controller._lanes.supersede()  # the TV tunes, no look since
+        self.assertFalse(ask["again"]())
+        self.assertFalse(remote._waits.waiting("d8"))
+        self.assertEqual(self.sent("stop"), [{"t": "stop"}])
+
+    def test_the_wait_is_over_only_once_the_stream_is_handed_on(self):
+        """Review 3 (batch 3): live, the wait stays until the stream is handed on (a recording
+        question may hold it back): the others hear another screen took over only then; and
+        the phone that asked last gone by then, the next one waiting gets it."""
+        self.connect()
+        self.connect("s9", "d9")
+        remote = self.window.remote
+        self.answers = [OFFLINE, OFFLINE]
+        self.watch("s8")
+        self.watch("s9")
+        self.assertTrue(wait_until(lambda: len(self.asks) == 3, timeout_ms=3000))  # unanswered
+        ask, launch = self.asks[-1][1], self.play_launch[-1]
+        self.assertTrue(ask["again"]())
+        self.assertTrue(remote._waits.waiting("d8"))  # not over yet: nothing handed on
+        self.assertEqual(self.sent("stop", "s8") + self.sent("stop", "s9"), [])
+        remote._phones.discard("s9")  # the phone that asked last left meanwhile
+        self.assertEqual(launch(self.target, "https://edge.example/live.m3u8"), (True, ""))
+        self.assertTrue(self.sent("play", "s8")[-1]["url"].startswith("https://edge.example"))
+        self.assertEqual(remote._waits.waits(), [])
 
     def test_waiting_holds_no_stream_of_what_the_phone_played(self):
         self.connect()

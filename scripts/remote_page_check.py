@@ -2551,6 +2551,13 @@ def scenario_typing(rig: Rig) -> None:
     assert rig.page.inner_text("#typeLabel") == "Find a setting"
     assert rig.page.locator("#typeButton").is_hidden()
     mark = rig.events.mark()
+    rig.page.press("#typeInput", "Enter")  # Go with nothing typed: nothing on the TV
+    rig.page.wait_for_selector("#typeSheet", state="hidden")
+    rig.page.wait_for_timeout(200)
+    assert not rig.events.of(Press, after=mark), "an empty Go pressed OK on the TV"
+    assert not rig.events.of(Typed, after=mark)
+    rig.page.click("#typeButton")
+    rig.page.wait_for_selector("#typeSheet:not([hidden])")
     rig.page.fill("#typeInput", "subtitles")
     typed = rig.events.wait(Typed, after=mark)
     assert (typed.box, typed.text) == (11, "subtitles"), typed

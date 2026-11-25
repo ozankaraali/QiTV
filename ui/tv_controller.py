@@ -1818,6 +1818,11 @@ class TVController(QObject):
             return "drawer"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
 
+    def choice_number(self) -> int:
+        """2.15: the newest choice's number (a tune, a film, Stop, an outside play): a
+        phone's wait for a channel ends once the TV makes another (one screen at a time)."""
+        return self._lanes.generation()
+
     def tv_waits_for(self, target: Target) -> bool:
         """2.15: the large picture waits for `target`'s channel to be live (a phone's wait for
         it gives way: one asks)."""

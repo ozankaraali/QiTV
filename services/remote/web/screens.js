@@ -1848,8 +1848,8 @@ function bindHere() {
 // once QiTV names it (no other box); if it never does, the sheet goes.
 const TYPE_DEBOUNCE_MS = 250;
 const LINK_WAIT_MS = 4000; // Open link's card named by then, or the sheet goes
-let box = null; // {id, secret}: QiTV's box the sheet types into (null: none yet)
-let offered = null; // {id, label, secret, text}: the box the keys type into, the sheet closed
+let box = null; // {id, secret, quiet}: QiTV's box the sheet types into (null: none yet)
+let offered = null; // {id, label, secret, text, quiet}: the box the keys type into, sheet closed
 let typeTimer = null; // the text still to go
 let touched = false; // typed into (a secret box's text is never replaced untouched)
 let dismissed = null; // the box Done closed: its sheet stays closed (the keyboard button opens it)
@@ -1934,8 +1934,8 @@ function onField(message) {
     flushTyped();
     const typed = touched ? $("typeInput").value : null; // pasted before the card came
     stopAwaitingLink();
-    box = { id, secret };
-    offered = { id, label, secret, text };
+    box = { id, secret, quiet: false };
+    offered = { id, label, secret, text, quiet: false };
     if (typed === null) {
       showTyping(label, secret, text);
       return;
@@ -1947,13 +1947,14 @@ function onField(message) {
     return;
   }
   flushTyped(); // the box before: its last letters (dropped there, if it is not it any more)
-  offered = { id, label, secret, text };
+  const quiet = message.quiet === true;
+  offered = { id, label, secret, text, quiet };
   const numpad = !$("moreSheet").hidden; // its digits typed into the channel list's find
   // The phone's own search shows (Show on TV opened the TV's), or one of its own fields has the
   // keyboard: the sheet would take it away.
   const field = document.activeElement;
   const own = document.body.dataset.shown === "search" || (field && field !== $("typeInput") && field.matches("input, textarea, select"));
-  if (message.quiet === true || id === dismissed || numpad || own) {
+  if (quiet || id === dismissed || numpad || own) {
     if (numpad) dismissed = id;
     if (typingShown()) {
       box = null; // (the box it typed into has the keys no more)
@@ -1962,7 +1963,7 @@ function onField(message) {
     drawTypeButton();
     return;
   }
-  box = { id, secret };
+  box = { id, secret, quiet };
   showTyping(label, secret, text);
 }
 
@@ -1970,7 +1971,7 @@ function onField(message) {
 function openOffered() {
   if (!offered) return;
   dismissed = null;
-  box = { id: offered.id, secret: offered.secret };
+  box = { id: offered.id, secret: offered.secret, quiet: offered.quiet };
   showTyping(offered.label, offered.secret, offered.secret ? "" : offered.text);
 }
 
@@ -2031,8 +2032,10 @@ function bindTyping() {
   });
   const go = () => {
     if (!box) return;
-    if (touched) sendTyped(true); // the text, then Enter
-    else tap("ok"); // nothing typed (a password kept as it is): Enter alone
+    if (touched) sendTyped(true); // the text, then Enter (QiTV's where the box has the keys)
+    else if (box.quiet) hideTyping(); // nothing typed where typing would start: nothing to do
+    else if (box.secret) tap("ok"); // a password kept as it is: Enter alone
+    else sendTyped(true); // the text as it is, then Enter
   };
   input.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.isComposing) return;
