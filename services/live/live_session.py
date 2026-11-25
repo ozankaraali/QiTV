@@ -4129,6 +4129,9 @@ class LiveSession(QObject):
             "position": position,
             "live_edge": edge,
             "lag": lag,
+            # A dated source's: how far the picture plays behind the broadcaster (None: not
+            # known), a yardstick of its own (the edge sits behind the broadcaster too).
+            "behind_broadcaster": self._behind_broadcaster(snapshot, position),
             # The lag as the Stay live indicator shows it: settled, in half seconds.
             "shown": shown if shown is not None else SettledLag.rounded(lag),
             "mode": self._stay.mode.value,
@@ -4469,6 +4472,30 @@ class LiveSession(QObject):
         parts = live_parts.from_state(snapshot.get("parts"))
         now = self._wall()
         return max(0.0, now - live_parts.wall_at(parts, position, live_edge=edge, now=now))
+
+    def _behind_broadcaster(self, snapshot: Mapping[str, Any], position: float) -> Optional[float]:
+        """How far the picture at `position` plays behind the broadcaster, by this computer's
+        clock (2026-11-25, the statistics' row): the time of day less the date the site
+        stamped on the piece playing (its PROGRAM-DATE-TIME; a piece being made, the one
+        reckoned for it), plus how far into the piece the position is. The helper places the
+        dates on the timeline (`dates`: [timeline second, a piece's date less it] from there
+        on). None: an undated source, or a position it placed no date at (a run's first
+        piece, an undated one, before the buffer: a server part or an archive)."""
+        dates = snapshot.get("dates")
+        if not isinstance(dates, list) or position < _number(snapshot.get("start")):
+            return None
+        offset = None
+        for entry in dates:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                return None
+            at, value = entry
+            if not isinstance(at, (int, float)) or at > position:
+                break
+            offset = value
+        if not isinstance(offset, (int, float)):
+            return None
+        behind = self._wall() - (offset + position)
+        return behind if math.isfinite(behind) else None
 
     # ---- helpers -----------------------------------------------------------------------
     def _snapshot(self) -> dict[str, Any]:

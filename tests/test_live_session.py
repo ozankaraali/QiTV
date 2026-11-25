@@ -31,6 +31,7 @@ from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS, Decision, StayLive
 from services.live.timeline import Span
 from services.live.tuning import LiveTuning, Tuning
+from services.picture import stats_rows
 from services.playback import PlaybackState
 from services.vlc_profile import PlayKind
 from ui.overlays.transport import Transport
@@ -210,6 +211,7 @@ class FakeEngine(QObject):
         settled=None,
         prefetching=None,
         ad_break=None,
+        dates=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
@@ -219,7 +221,8 @@ class FakeEngine(QObject):
         `open_quality`: how cleanly the open segment starts; `video`: whether the stream has
         a video PID (left out when None, as an older helper does); `prefetching`: an HLS
         source reads its playlist's prefetch pieces as they are made, `ad_break`: it skips a
-        live site's ad break now (each left out when None)."""
+        live site's ad break now, `dates`: [timeline second, a piece's date less it] from where
+        each holds (each left out when None)."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -245,6 +248,8 @@ class FakeEngine(QObject):
             self._snapshots[sid]["prefetching"] = prefetching
         if ad_break is not None:  # a live site's ad break, its pieces skipped
             self._snapshots[sid]["ad_break"] = ad_break
+        if dates is not None:  # a dated source's dates on the timeline
+            self._snapshots[sid]["dates"] = [list(entry) for entry in dates]
         if video is not None:
             self._snapshots[sid]["video"] = video
         if parts is not None:  # 2.6: [first_seq, start, wall] of each part
@@ -9718,3 +9723,65 @@ class PrefetchTargetTests(LiveSessionCase):
         self.live.set_caption_floor(0.0)
         feed.run(0.5)
         self.assertTrue(self.live._stay.close and learned.close)
+
+
+class BroadcasterTests(LiveSessionCase):
+    """2026-11-25 (the owner: stats for nerds; whether QiTV keeps up with a site's own player
+    is judged by eye, side by side): a dated source's state says how far its picture plays
+    behind the broadcaster (`behind_broadcaster`), by this computer's clock: the time of day
+    less the date the site stamped on the piece playing, plus how far into it the position
+    is. The helper places its dates on the timeline (`dates`: [timeline second, a piece's
+    date less that second] from where each holds; None: undated from there)."""
+
+    DAY = 1_795_000_000.0  # the date of the media at timeline second 0
+
+    def test_a_dated_source_reports_how_far_its_picture_is_behind_the_broadcaster(self):
+        # Pieces dated from DAY; at timeline second 2 a 30 s ad break skipped (its pieces
+        # never fetched): the dates jump on, the timeline does not.
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        dates = [[0.0, self.DAY], [2.0, self.DAY + 30.0]]
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=dates)
+        wall = [self.DAY + 3.25]
+        self.live._wall = lambda: wall[0]
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)  # position 0.25: its piece's date DAY plus 0.25 into it
+        self.assertAlmostEqual(self.timelines[-1]["position"], 0.25)
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.0)
+        wall[0] += 1.0
+        self.step(1.0)  # at 1x it stands
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.0)
+        wall[0] += 1.0
+        self.step(0.0)  # the picture stood while the broadcaster went on
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 4.0)
+        wall[0] = self.DAY + 36.0
+        self.step(1.5)  # position 2.75, after the break: dated DAY + 32.75
+        self.assertAlmostEqual(self.timelines[-1]["position"], 2.75)
+        self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], 3.25)
+        self.assertLess(self.timelines[-1]["lag"], 2.0)  # "Behind live", its own yardstick
+
+    def test_an_undated_source_reports_no_broadcaster_figure(self):
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        self.live._wall = lambda: self.DAY + 3.0
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        state = self.timelines[-1]
+        self.assertIsNone(state["behind_broadcaster"])
+        shown = dict(stats_rows({"lag": state["lag"], "behind_broadcaster": None}))
+        self.assertIn("Behind live", shown)
+        self.assertNotIn("Behind the broadcaster", shown)
+        # Nor where its dates do not reach: before the first placed (a run's first piece's
+        # start on the timeline is its first keyframe, not where its date is), or from a
+        # piece undated on. Dated where it plays, it says.
+        cases = (
+            ([[1.0, self.DAY]], None),
+            ([[0.0, self.DAY], [0.2, None]], None),
+            ([[0.0, self.DAY]], 3.0 - 1.0),  # (at position 1.0 by then)
+        )
+        for dates, behind in cases:
+            with self.subTest(dates=dates):
+                self.engine.buffer(sid, segments(0, 2), live_edge=4.0, dates=dates)
+                self.step(0.25)
+                if behind is None:
+                    self.assertIsNone(self.timelines[-1]["behind_broadcaster"])
+                else:
+                    self.assertAlmostEqual(self.timelines[-1]["behind_broadcaster"], behind)

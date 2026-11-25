@@ -4224,11 +4224,26 @@ class TVController(QObject):
             return 0.0
         return live_parts.behind_in(timeline) or 0.0  # 2.6: the time away included
 
+    def _behind_broadcaster(self) -> Optional[float]:
+        """How far the large picture plays behind the broadcaster, by the dates a dated
+        channel's pieces carry, as the time-shift helper reports it (None: as `_live_lag`,
+        or the channel's pieces are undated)."""
+        if self._live_lag() is None:
+            return None
+        timeline = self._tuner.timeline
+        behind = timeline.get("behind_broadcaster") if isinstance(timeline, dict) else None
+        return float(behind) if isinstance(behind, (int, float)) else None
+
     def _live_info(self) -> dict:
-        """The statistics' source and lag for the large picture."""
+        """The statistics' source, lag and how far behind the broadcaster, for the large
+        picture."""
         live = self.live
         kind = live.source_kind() if live is not None and live.is_pipeline() else ""
-        return {"source": kind or SOURCE_DIRECT, "lag": self._live_lag()}
+        return {
+            "source": kind or SOURCE_DIRECT,
+            "lag": self._live_lag(),
+            "behind_broadcaster": self._behind_broadcaster(),
+        }
 
     def _programme_left(self) -> Optional[float]:
         """Seconds until the programme the large picture's channel shows ends (a time-shifted

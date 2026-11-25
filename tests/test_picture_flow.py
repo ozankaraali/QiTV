@@ -8,6 +8,7 @@ The controller's fakes are tests/test_tv_controller.py's.
 
 from datetime import timedelta
 import os
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -81,7 +82,21 @@ class PictureKeysTests(ControllerTestCase):
 
     def test_the_statistics_say_a_direct_play_is_direct(self):
         self.play(0)
-        self.assertEqual(self.controller._live_info(), {"source": "direct", "lag": None})
+        self.assertEqual(
+            self.controller._live_info(),
+            {"source": "direct", "lag": None, "behind_broadcaster": None},
+        )
+
+    def test_the_statistics_say_how_far_a_dated_channel_is_behind_its_broadcaster(self):
+        self.play(0)
+        controller = self.controller
+        self.addCleanup(setattr, controller._tuner, "timeline", None)
+        controller._tuner.timeline = {"lag": 1.2, "behind_broadcaster": 3.4}
+        self.assertIsNone(controller._live_info()["behind_broadcaster"])  # it plays directly
+        with mock.patch.object(controller, "_live_lag", return_value=1.2):  # time-shifted
+            self.assertEqual(controller._live_info()["behind_broadcaster"], 3.4)
+            controller._tuner.timeline = {"lag": 1.2, "behind_broadcaster": None}  # undated
+            self.assertIsNone(controller._live_info()["behind_broadcaster"])
 
     def test_the_sleep_timers_end_stops_playback_and_leaves_fullscreen(self):
         self.play(0)

@@ -224,6 +224,12 @@ _TITLES_KEPT = 4096
 # ... and a station's sound resumed after a kept buffer was taken back starts this far past
 # the newest segment's last PTS: past the longest frame (1152 samples at 8 kHz: 0.144 s)
 _SOUND_RESUME_TICKS = 13_500
+# HLS (2026-11-25, the statistics' "Behind the broadcaster"): a dated source's pieces' dates on
+# the timeline (`_place_date`), kept as runs of one date less timeline second; a new run where
+# that moves by this much or more (a skipped ad break, a gap; the encoder's clock drifting a
+# tenth of a second), at most this many runs while the ring holds them (a memory bound)
+_DATE_STEP_S = 0.1
+_DATES_KEPT = 64
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -614,6 +620,8 @@ class _Session:
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         # 2.14, a station's sound: (timeline position, its song from there; "": none)
         self._titles: deque[tuple[float, str, bool]] = deque(maxlen=_TITLES_KEPT)
+        # HLS: (timeline position, a piece's date less it) from there on (None: undated)
+        self._dates: deque[tuple[float, float | None]] = deque(maxlen=_DATES_KEPT)
         self._titles_sent: tuple[Any, ...] | None = None  # what the last state's titles were
         self._sound_from: int | None = None  # 2.14: a resumed station's first PTS
         self._last_notify = 0.0
@@ -1571,7 +1579,8 @@ class _Session:
         measure the one before if it arrived whole: its media against its EXTINF. Not the
         first that brought media (it began at edge 0.0): the timeline starts at its first
         keyframe, so whatever came before that would read as missing media. Its EXTINF is the
-        clock joiner's arrival (`ClockJoiner.arrive`)."""
+        clock joiner's arrival (`ClockJoiner.arrive`). Its date is placed there
+        (`_place_date`), not a run's first one's, for the same reason."""
         serial = getattr(source, "segment_serial", 0)
         if serial == self._segment[0]:
             return
@@ -1587,6 +1596,30 @@ class _Session:
             media, extinf = self._measured
             self._measured = (media + edge - began, extinf + whole[1])
         self._segment = (serial, edge)
+        date = getattr(source, "segment_date", None)
+        self._place_date(edge, date if previous and isinstance(date, float) else None)
+
+    def _place_date(self, t: float, date: float | None) -> None:
+        """HLS: the date (Unix seconds; None: not known) of the piece whose media begins at
+        timeline second `t`, which the state carries (`dates`) for the parent to read the
+        date of any second from (the statistics' "Behind the broadcaster": the time of day
+        less the date of the second playing). Kept as that date less `t` from `t` on, a new
+        run only where it moves by `_DATE_STEP_S` or more, or the dates end (an undated piece
+        after dated ones, a run's first piece after another run); the oldest go once the ring
+        no longer holds them."""
+        dates = self._dates
+        while dates and dates[-1][0] >= t:
+            dates.pop()  # a piece that brought no media: the one beginning there now holds
+        offset = None if date is None else date - t
+        last = dates[-1][1] if dates else None
+        if offset is None:
+            if last is not None:
+                dates.append((t, None))
+        elif last is None or abs(offset - last) >= _DATE_STEP_S:
+            dates.append((t, offset))
+        start = self._timeline.start
+        while len(dates) > 1 and dates[1][0] <= start:
+            dates.popleft()
 
     def _backlog(self, source: Source | None) -> float | None:
         """HLS: the media its playlist listed still to come: what the segment being fetched
@@ -1747,6 +1780,11 @@ class _Session:
             part_media = getattr(source, "part_media_s", None)
             if part_media is not None:
                 snapshot["part_media_s"] = float(part_media)
+            dates = list(self._dates)  # (placed by the session thread meanwhile)
+            if dates:
+                # A dated source's dates on the timeline (`_place_date`), the oldest first:
+                # [timeline position, a piece's date less it] from there on (None: undated).
+                snapshot["dates"] = [[at, offset] for at, offset in dates]
             if getattr(source, "until_dropped", False) is True:
                 snapshot["until_dropped"] = True  # another encoding persisted: no stop
         self._heard_edge = edge

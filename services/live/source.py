@@ -1369,6 +1369,14 @@ def _is_ad(
     return any(start <= dated and (end is None or dated < end) for start, end in ad_ranges)
 
 
+def _date_of(segment: Any) -> float | None:
+    """A piece's date as Unix seconds: its PROGRAM-DATE-TIME, else the last one before it plus
+    the lengths since (a prefetch piece's, the one reckoned for it: `_with_prefetch`); None
+    when the playlist dates none before it."""
+    dated = segment.current_program_date_time or segment.program_date_time
+    return None if dated is None else _utc(dated).timestamp()
+
+
 def _is_prefetch(segment: Any) -> bool:
     """A piece still being made, listed after a live playlist's finished ones (`_with_prefetch`)."""
     values = getattr(segment, "custom_parser_values", None)
@@ -1920,6 +1928,7 @@ class HlsSource:
         self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
         self._serial = 0  # segments started so far
         self._sequence: int | None = None  # 2.7: the media sequence of the one started last
+        self._dated: float | None = None  # ... and its date (`_date_of`; None: undated)
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
         self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
@@ -2055,6 +2064,13 @@ class HlsSource:
     def segment_sequence(self) -> int | None:
         """The media sequence of the segment whose bytes come now (2.7); None before one."""
         return self._sequence
+
+    @property
+    def segment_date(self) -> float | None:
+        """The date of the segment whose bytes come now, as Unix seconds (`_date_of`): the
+        helper places the site's clock on its timeline by it (the statistics' "Behind the
+        broadcaster"); None while it is undated, or before one."""
+        return self._dated
 
     @property
     def fmp4(self) -> bool:
@@ -2384,7 +2400,7 @@ class HlsSource:
                 self._fetching = float(segment.duration or 0)
                 self._rest = max(0.0, self._rest - self._fetching)
                 self._serial += 1
-                self._sequence = sequence
+                self._sequence, self._dated = sequence, _date_of(segment)
                 yield from self._segment(segment, sequence, url)
             self._fetching = 0.0
             if fresh and not again:

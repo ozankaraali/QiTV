@@ -3841,6 +3841,50 @@ video.m3u8
         self.run_for(server, 0.5, live_delay=100.0)  # all of it, before the first reload
         self.assertEqual(requested_segments(server), names + ["p6.ts", "p7.ts"])
 
+    def test_each_piece_says_its_date_as_its_bytes_come(self):
+        # 2026-11-25, the statistics' "Behind the broadcaster": the helper places the site's
+        # dates on its timeline where each piece begins. A dated piece's own; one after it
+        # dated by it; a piece being made the date reckoned for it (`_with_prefetch`); none
+        # undated.
+        day = DAY.timestamp()
+        names, made = ["s0.ts", "s1.ts"], ["p2.ts"]
+        once = (
+            f"#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            f"#EXT-X-PROGRAM-DATE-TIME:{stamp(0)}\n#EXTINF:2.000,live\ns0.ts\n"
+            "#EXTINF:2.000,live\ns1.ts\n#EXT-X-PREFETCH:p2.ts\n"
+        ).encode()
+        cases = (
+            ("each dated", site_playlist(0, names, made), [day, day + 2.0, day + 4.0]),
+            ("the first dated", once, [day, day + 2.0, day + 4.0]),
+            ("undated", site_playlist(0, names, made, dates=False), [None, None, None]),
+        )
+        for label, copy, dates in cases:
+            with self.subTest(label):
+                server = self.copies([copy], names + made)
+                source = open_source(
+                    server.url + "/live.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    live_delay=100.0,
+                )
+                seen = {}
+                try:
+                    self.assertIsNone(source.segment_date)
+                    for item in source.chunks():
+                        if isinstance(item, bytes) and item:
+                            seen.setdefault(source.segment_sequence, source.segment_date)
+                        if len(seen) == len(dates):
+                            break
+                finally:
+                    source.close()
+                self.assertEqual(list(seen), [0, 1, 2])
+                for got, wanted in zip(seen.values(), dates):
+                    if wanted is None:
+                        self.assertIsNone(got)
+                    else:
+                        self.assertAlmostEqual(got, wanted, places=3)
+
     def test_starts_at_the_first_prefetch_piece(self):
         # Under Auto, Normal and Low: not the target's depth back from the end (three 6 s
         # target durations, Kick's: 7.6 s behind the clock in all). Under Stable (2026-11-25,
