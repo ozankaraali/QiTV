@@ -50,12 +50,15 @@
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
   <symbol id="i-subtitles" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.4"/><path d="M6.5 10.8H12M14 10.8h3.5M6.5 14.4h3.5M12 14.4h5.5"/></symbol>
   <symbol id="i-sound" viewBox="0 0 24 24"><ellipse cx="7.9" cy="17" rx="3.1" ry="2.6" class="solid"/><path d="M10.6 16.8V4.8l8.6-1.9V12"/><ellipse cx="16.5" cy="13.2" rx="3.1" ry="2.6" class="solid"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2.2"/><path d="M6 9.5h.01M9.3 9.5h.01M12.6 9.5h.01M15.9 9.5h.01M18 9.5h.01M6 12h.01M9.3 12h.01M12.6 12h.01M15.9 12h.01M18 12h.01M8 14.8h8"/></symbol>
   <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.2 13.8a4.2 4.2 0 0 0 5.9 0l3.2-3.2a4.2 4.2 0 0 0-5.9-5.9l-1.3 1.3"/><path d="M13.8 10.2a4.2 4.2 0 0 0-5.9 0l-3.2 3.2a4.2 4.2 0 0 0 5.9 5.9l1.3-1.3"/></symbol>
 </svg>
 
 <main id="app">
   <header class="top">
     <button class="conn" id="tvButton" type="button"><i id="dot"></i><span id="tvName">QiTV</span></button>
+    <!-- 2.15: a text box on the TV takes typing (the box's name, said by QiTV): the typing sheet -->
+    <button class="menu typer" id="typeButton" type="button" hidden><svg><use href="#i-keyboard"/></svg></button>
     <!-- 2.9.7: where a tap plays, for the Guide and the Library: in the top line, as the TV's -->
     <div class="where"><button type="button" class="switch" role="switch" aria-checked="false" data-where="phone" aria-label="Phone" data-tl="phone"><span class="knob"></span></button><span class="where-label" data-t="phone">Phone</span></div>
     <!-- 2.9.7: the Remote's channel list, an icon in the top line (the banner keeps the width) -->

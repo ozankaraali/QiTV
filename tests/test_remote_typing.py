@@ -23,6 +23,7 @@ from ui.link_lanes import Target
 from ui.remote_typing import focused_field
 
 KICK_PAGE = "https://kick.com/examplechannel"
+FIND = "Find a genre or channel"  # the channel list's Find box
 OFFLINE = "examplechannel isn't live now"
 
 
@@ -54,7 +55,8 @@ class TypingTests(PhoneCase):
         """The phone's Open link opens the card as File → Open Link… does; its field has the
         keys, so the phones hear of it (numbered, with its text), and what one types goes in as
         typed (the found line follows); its Go is Enter: the link plays. A number no longer the
-        box's types nothing; the card gone, the phones hear no box has the keys."""
+        box's types nothing; the card gone, the phones hear of the box under it: the channel
+        list's Find box, offered quiet (typing there finds)."""
         self.show()
         self.wait_for_drawer()
         self.connect()
@@ -64,7 +66,8 @@ class TypingTests(PhoneCase):
         remote._push_state()
         [shown] = self.fields()
         number = shown["id"]
-        self.assertEqual(shown, {"t": "field", "id": number, "label": "Open a link", "text": ""})
+        opened = {"t": "field", "id": number, "label": "Open a link", "text": "", "link": True}
+        self.assertEqual(shown, opened)
         remote._on_event(Typed("s8", number, KICK_PAGE))
         self.assertEqual(card.values(), {"link": KICK_PAGE})
         self.assertEqual(card.found(), ("✓ A live stream", True))  # as typed: its line follows
@@ -78,9 +81,49 @@ class TypingTests(PhoneCase):
         play.assert_called_once_with(KICK_PAGE, LIVE)
         self.assertTrue(card.isHidden())
         remote._push_state()
-        self.assertEqual(self.fields()[-1], {"t": "field"})
+        under = self.fields()[-1]
+        self.assertEqual((under["label"], under.get("quiet"), "link" in under), (FIND, True, False))
         remote._push_state()
-        self.assertEqual(self.fields()[-1:], [{"t": "field"}])  # said once
+        self.assertEqual(self.fields()[-1:], [under])  # said once
+
+    def test_open_link_again_names_the_card_to_the_phone_that_asked(self):
+        """Review 1: a second Open link (the card open already: by this phone, another, or the
+        TV) is the same box: the phone that asked hears of it at once, or its sheet waits."""
+        self.show()
+        self.wait_for_drawer()
+        self.connect()
+        self.connect("s9", "d9")
+        remote = self.window.remote
+        remote._on_event(OpenLinkCard("s8"))
+        shown = self.fields()[-1]
+        self.assertTrue(shown["link"])
+        for sid in ("s8", "s9"):
+            remote._on_event(OpenLinkCard(sid))
+            self.assertEqual(self.sent("field", sid)[-1], shown)
+        self.assertEqual(self.fields()[-1], shown)  # (not told to all again)
+
+    def test_go_waits_while_the_card_checks(self):
+        """Review 3: the card cannot take typing while it checks: neither the text nor Enter
+        goes in then; both do once it can."""
+        self.show()
+        self.wait_for_drawer()
+        self.connect()
+        remote, card = self.window.remote, self.window.open_link_card
+        remote._on_event(OpenLinkCard("s8"))
+        number = self.fields()[-1]["id"]
+        card.set_busy(True)
+        with mock.patch.object(remote, "_press") as press:
+            remote._on_event(Typed("s8", number, KICK_PAGE, True))
+            self.assertEqual(card.values(), {"link": ""})
+            press.assert_not_called()
+            remote._push_state()
+            press.assert_not_called()
+            card.set_busy(False)
+            remote._push_state()
+            self.assertEqual(card.values(), {"link": KICK_PAGE})
+            press.assert_called_once_with("ok")
+            remote._push_state()
+            press.assert_called_once_with("ok")  # once
 
     def test_a_phone_that_comes_hears_of_the_box_there_is(self):
         self.show()
@@ -136,7 +179,8 @@ class TypingTests(PhoneCase):
         window.open_settings(row="opensubtitles_username")
         settings = window.settings_drawer
         self.assertTrue(wait_until(settings.isVisible))
-        self.assertIsNone(focused_field(window))  # its rows have the keys: typing finds
+        box = focused_field(window)  # its rows have the keys: typing finds a setting
+        self.assertEqual((box.label, box.quiet), ("Find a setting", True))
         QTest.keyClick(window, Qt.Key.Key_Return)  # editing the text in place
         self.assertTrue(settings.editing())
         remote._push_state()
@@ -156,11 +200,12 @@ class TypingTests(PhoneCase):
         drawer = self.wait_for_drawer()
         self.connect()
         remote = self.window.remote
-        self.assertIsNone(focused_field(self.window))
+        offered = focused_field(self.window)  # typing would find: offered quiet
+        self.assertEqual((offered.label, offered.quiet), (FIND, True))
         drawer.start_find()
         remote._push_state()
         shown = self.fields()[-1]
-        self.assertEqual((shown["label"], shown["text"]), ("Find a genre or channel", ""))
+        self.assertEqual((shown["label"], shown["text"], "quiet" in shown), (FIND, "", False))
         remote._on_event(Typed("s8", shown["id"], "Channel 2"))
         self.assertEqual(drawer.find_text, "Channel 2")
         self.assertTrue(drawer.finding())
@@ -180,6 +225,85 @@ class TypingTests(PhoneCase):
         box = focused_field(self.window)
         self.assertIsNotNone(box)
         self.assertEqual((box.label, box.text), ("Find a genre or channel", "5"))
+
+    def test_typing_into_a_quiet_box_starts_it_and_it_is_not_told_again(self):
+        """The phone's keyboard button on the channel list's quiet Find box: its typing opens
+        the find (as typing does), and the box that opened is not told as another."""
+        self.show()
+        drawer = self.wait_for_drawer()
+        self.connect()
+        remote = self.window.remote
+        remote._push_state()
+        offered = self.fields()[-1]
+        self.assertTrue(offered["quiet"])
+        remote._on_event(Typed("s8", offered["id"], "Channel 2"))
+        self.assertTrue(drawer.finding())
+        remote._push_state()
+        self.assertEqual(self.fields(), [offered])
+
+    def test_settings_find_takes_the_phones_text(self):
+        self.show()
+        self.wait_for_drawer()
+        self.connect()
+        window, remote = self.window, self.window.remote
+        window.open_settings()
+        settings = window.settings_drawer
+        self.assertTrue(wait_until(settings.isVisible))
+        remote._push_state()
+        offered = self.fields()[-1]
+        self.assertEqual((offered["label"], offered["quiet"]), ("Find a setting", True))
+        remote._on_event(Typed("s8", offered["id"], "subtitles"))
+        self.assertTrue(settings.finding())
+        self.assertEqual(settings.find_text(), "subtitles")
+        remote._on_event(Typed("s8", offered["id"], "subtitles size"))
+        self.assertEqual(settings.find_text(), "subtitles size")
+        remote._on_event(Typed("s8", offered["id"], ""))  # all of it deleted: the find ends
+        self.assertFalse(settings.finding())
+        remote._push_state()
+        self.assertEqual(self.fields(), [offered])
+
+    def test_the_librarys_search_and_genre_filter(self):
+        self.show()
+        self.wait_for_drawer()
+        self.connect()
+        window, remote = self.window, self.window.remote
+        window.screens.open_library("movies")
+        self.assertTrue(wait_until(window.screens.library_shown))
+        library = window.library_controller
+        box = focused_field(window)  # typing anywhere searches: offered quiet
+        self.assertEqual((box.label, box.quiet), ("Search movies, series and channels", True))
+        remote._push_state()
+        offered = self.fields()[-1]
+        remote._on_event(Typed("s8", offered["id"], "harbour"))
+        searched = (library.mode, library.zone, library.query)
+        self.assertEqual(searched, ("search", "search", "harbour"))
+        remote._push_state()
+        self.assertEqual(self.fields(), [offered])  # the search it opened: the same box
+        library._focus("genres", field=True)  # the genre filter chosen
+        remote._push_state()
+        genres = self.fields()[-1]
+        self.assertEqual((genres["label"], "quiet" in genres), ("Find a genre…", False))
+        remote._on_event(Typed("s8", genres["id"], "dra"))
+        self.assertEqual(window.library_page.genres.filter_text, "dra")
+
+    def test_the_opensubtitles_search_field(self):
+        """Its key page's field is secret; what is searched for is not; typing anywhere on the
+        page goes into the field, so it is offered quiet off it."""
+        self.show()
+        page = self.window.subtitle_search
+        page.show_key_page()
+        box = page.phone_field()
+        self.assertEqual((box.label, box.secret, box.text), ("Paste your API key here", True, ""))
+        self.assertTrue(page.phone_type(box.key, " abc 123 "))
+        self.assertEqual(page.key_text(), "abc123")
+        page.show_search("Harbour Lights (1998)")
+        box = page.phone_field()
+        searched = (box.label, box.secret, box.text)
+        self.assertEqual(searched, ("Film or series title", False, "Harbour Lights (1998)"))
+        self.assertTrue(page.phone_type(box.key, "Harbour Lights"))
+        self.assertEqual(page.query(), "Harbour Lights")
+        page.dismiss()
+        self.assertIsNone(page.phone_field())
 
     def test_a_question_over_the_box_has_the_keys(self):
         self.show()
@@ -370,6 +494,59 @@ class SiteWaitTests(PhoneCase):
         self.connect("s10", "d8")
         self.assertFalse(failed(self.target, OFFLINE))  # waits on
         self.assertTrue(remote._waits.waiting("d8"))
+
+    def test_the_tv_playing_something_else_ends_the_wait(self):
+        """Review 2: one screen at a time: the TV starting to play something else ends a
+        phone's wait, as it ends its Watch; the phone hears the TV took over."""
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.answers = [OFFLINE]
+        self.watch()
+        self.assertTrue(remote._waits.waiting("d8"))
+        remote._push_state()
+        self.assertTrue(remote._waits.waiting("d8"))  # the TV as it was: it waits on
+        other = Target({"name": "Channel 2", "cmd": "http://p.test/two.m3u8"}, "live", "Two")
+        with (
+            mock.patch.object(controller, "now_playing", return_value=other),
+            mock.patch.object(controller, "showing_here", return_value=True),
+        ):
+            remote._push_state()
+        self.assertFalse(remote._waits.waiting("d8"))
+        self.assertEqual(self.sent("stop"), [{"t": "stop"}])
+        asks = len(self.asks)
+        pause(400)
+        self.assertEqual(len(self.asks), asks)
+
+    def test_the_tv_waiting_for_the_channel_itself_takes_over(self):
+        self.connect()
+        remote, controller = self.window.remote, self.window.controller
+        self.answers = [OFFLINE]
+        self.watch()
+        with mock.patch.object(controller, "tv_waits_for", return_value=True):
+            remote._push_state()
+        self.assertFalse(remote._waits.waiting("d8"))  # its own wait asks: one, not two
+
+    def test_two_phones_waiting_for_a_channel_share_its_asks(self):
+        """Review 6: one wait per channel: one ask each time for every phone waiting on it;
+        live, it plays on the phone that asked last, and the other hears another screen took
+        over."""
+        self.connect()
+        self.connect("s9", "d9")
+        remote = self.window.remote
+        self.answers = [OFFLINE, OFFLINE]
+        self.watch("s8")
+        self.watch("s9")
+        self.assertEqual(self.heard, [True, True])
+        [wait] = remote._waits.waits()
+        self.assertEqual(wait.devices, ["d8", "d9"])
+        self.answers = [OFFLINE, "https://edge.example/live.m3u8?token=sentinel"]
+        self.assertTrue(wait_until(lambda: len(self.asks) == 4, timeout_ms=3000))
+        pause(100)
+        self.assertEqual(len(self.asks), 4)  # one ask a turn, not one a phone
+        self.assertEqual(self.asks[2][1]["ask_on"], "s9")  # for the phone that asked last
+        self.assertTrue(self.sent("play", "s9")[-1]["url"].startswith("https://edge.example"))
+        self.assertEqual(self.sent("stop", "s8"), [{"t": "stop"}])
+        self.assertEqual(remote._waits.waits(), [])
 
     def test_waiting_holds_no_stream_of_what_the_phone_played(self):
         self.connect()

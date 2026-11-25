@@ -1837,22 +1837,35 @@ function bindHere() {
 
 // ---- 2.15: typing into the TV's text boxes, and Open link ---------------------------------
 // QiTV says which of its text boxes the keys type into ("field": its number, its name, its text;
-// a secret one only that it is: masked here, its text never sent) or that none does ({t:
-// "field"}). The sheet shows while one does: what is typed (or pasted) replaces the box's text
-// as it is typed, a moment after the last key (never a burst); Go is Enter on the TV (with the
-// text first, when it changed); Done closes it for that box (the next one shows it again). Open
-// link (a QiTV whose hello says "link") opens the TV's Open Link card: the sheet comes at once,
-// in the tap, so the phone's keyboard is up, and types into the card's field once QiTV names it.
+// a secret one only that it is: masked here, its text never sent; Open Link's says "link") or
+// that none does ({t: "field"}). The sheet shows while one does: what is typed (or pasted)
+// replaces the box's text as it is typed, a moment after the last key (never a burst); Go is
+// Enter on the TV (with the text first, when it changed); Done closes it for that box. A box
+// that typing would start ("quiet": the channel list's find, Settings' find, the Library's
+// search) opens no sheet: the keyboard button in the top line does, as it does for a box Done
+// closed. Open link (a QiTV whose hello says "link") opens the TV's Open Link card: the sheet
+// comes at once, in the tap, so the phone's keyboard is up, and types into the card's field
+// once QiTV names it (no other box); if it never does, the sheet goes.
 const TYPE_DEBOUNCE_MS = 250;
+const LINK_WAIT_MS = 4000; // Open link's card named by then, or the sheet goes
 let box = null; // {id, secret}: QiTV's box the sheet types into (null: none yet)
+let offered = null; // {id, label, secret, text}: the box the keys type into, the sheet closed
 let typeTimer = null; // the text still to go
 let touched = false; // typed into (a secret box's text is never replaced untouched)
-let dismissed = null; // the box Done closed: its sheet stays closed
+let dismissed = null; // the box Done closed: its sheet stays closed (the keyboard button opens it)
 let awaitingLink = false; // Open link tapped: the card's field is on its way
+let linkTimer = null;
 let typingTv = null; // the TV the boxes are of (another's numbers are other boxes)
 
 function typingShown() {
   return !$("typeSheet").hidden;
+}
+
+// The keyboard button: a box the TV's keys type into, the sheet closed.
+function drawTypeButton() {
+  const button = $("typeButton");
+  button.hidden = !offered || typingShown();
+  if (offered) button.setAttribute("aria-label", offered.label); // what typing there does
 }
 
 // The sheet goes (and the veil, when no other sheet shows).
@@ -1870,6 +1883,7 @@ function sendTyped(go = false) {
   typeTimer = null;
   if (!box) return;
   const message = { t: "type", id: box.id, s: $("typeInput").value };
+  if (offered && offered.id === box.id && !box.secret) offered.text = message.s; // as the TV has it
   send(go ? { ...message, go: true } : message);
 }
 
@@ -1886,6 +1900,7 @@ function showTyping(label, secret, text) {
   touched = false;
   if (!typingShown()) openSheet("typeSheet");
   keepAboveKeyboard();
+  drawTypeButton();
   try {
     input.focus({ preventScroll: true }); // the keyboard, where the phone allows it unasked
   } catch {
@@ -1893,45 +1908,77 @@ function showTyping(label, secret, text) {
   }
 }
 
+function stopAwaitingLink() {
+  awaitingLink = false;
+  clearTimeout(linkTimer);
+  linkTimer = null;
+}
+
 function onField(message) {
   const id = Number.isInteger(message.id) ? message.id : null;
   if (id === null) {
     box = null; // no box has the keys: closed, nothing more goes
+    offered = null;
     clearTimeout(typeTimer);
     typeTimer = null;
     if (!awaitingLink) hideTyping();
+    drawTypeButton();
     return;
   }
   if (box && box.id === id) return; // the same box (said again to a phone that came back)
-  if (id === dismissed) return;
-  if (!awaitingLink && !$("moreSheet").hidden) {
-    dismissed = id; // the numpad's digits typed into the channel list's find: it stays
-    return;
-  }
-  flushTyped(); // the box before: its last letters (dropped there, if it is not it any more)
   const secret = message.secret === true;
   const label = typeof message.label === "string" ? message.label : "";
   const text = !secret && typeof message.text === "string" ? message.text : "";
-  const typed = awaitingLink && touched ? $("typeInput").value : null; // before the card came
-  awaitingLink = false;
-  box = { id, secret };
-  if (typed !== null) {
+  if (awaitingLink) {
+    if (message.link !== true) return; // Open link types into the card's field alone
+    flushTyped();
+    const typed = touched ? $("typeInput").value : null; // pasted before the card came
+    stopAwaitingLink();
+    box = { id, secret };
+    offered = { id, label, secret, text };
+    if (typed === null) {
+      showTyping(label, secret, text);
+      return;
+    }
     $("typeLabel").textContent = label;
+    $("typeInput").type = secret ? "password" : "text";
     touched = true;
     sendTyped();
     return;
   }
+  flushTyped(); // the box before: its last letters (dropped there, if it is not it any more)
+  offered = { id, label, secret, text };
+  const numpad = !$("moreSheet").hidden; // its digits typed into the channel list's find
+  if (message.quiet === true || id === dismissed || numpad) {
+    if (numpad) dismissed = id;
+    if (typingShown()) {
+      box = null; // (the box it typed into has the keys no more)
+      hideTyping();
+    }
+    drawTypeButton();
+    return;
+  }
+  box = { id, secret };
   showTyping(label, secret, text);
+}
+
+// The keyboard button: the sheet for the box offered (in the tap: the keyboard comes up).
+function openOffered() {
+  if (!offered) return;
+  dismissed = null;
+  box = { id: offered.id, secret: offered.secret };
+  showTyping(offered.label, offered.secret, offered.secret ? "" : offered.text);
 }
 
 function typingClosed() {
   flushTyped();
   if (box) dismissed = box.id;
   box = null;
-  awaitingLink = false;
+  stopAwaitingLink();
   touched = false;
   $("typeSheet").style.bottom = "";
   $("typeInput").blur();
+  drawTypeButton();
 }
 
 // iOS keeps a sheet fixed to the bottom under its keyboard: it rises over it.
@@ -1948,6 +1995,10 @@ function openLink() {
   dismissed = null;
   awaitingLink = true;
   showTyping(w("open_link"), false, ""); // in the tap: the keyboard comes up
+  clearTimeout(linkTimer);
+  linkTimer = setTimeout(() => {
+    if (awaitingLink && !box) hideTyping(); // the card never came (a question has the keys)
+  }, LINK_WAIT_MS);
   send({ t: "link" });
 }
 
@@ -1958,10 +2009,12 @@ function onTypingHello(message) {
   typingTv = app.tvId;
   // A new session: QiTV says again which box has the keys, if one does.
   box = null;
-  awaitingLink = false;
+  offered = null;
+  stopAwaitingLink();
   clearTimeout(typeTimer);
   typeTimer = null;
   hideTyping();
+  drawTypeButton();
 }
 
 function bindTyping() {
@@ -1995,6 +2048,9 @@ function bindTyping() {
   const button = $("openLink");
   pressable(button);
   button.addEventListener("click", openLink);
+  const keyboard = $("typeButton");
+  pressable(keyboard);
+  keyboard.addEventListener("click", openOffered);
   if (window.visualViewport) {
     for (const type of ["resize", "scroll"]) window.visualViewport.addEventListener(type, keepAboveKeyboard);
   }

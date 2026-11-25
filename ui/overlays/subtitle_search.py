@@ -50,6 +50,7 @@ from services.opensubtitles import SubtitleFile, shown_release
 from ui.keymap import Action, key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, fill_round, ui_units
+from ui.remote_typing import PhoneField
 from ui.text_edit import SELECTION_ALPHA, Dragging, TextEdit, edit_key, paint_edit
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -306,6 +307,33 @@ class SubtitleSearchPage(Overlay):
 
     def busy(self) -> bool:
         return self._busy
+
+    # ---- a phone's typing (2.15, ui/remote_typing.py) ---------------------------------------
+
+    def phone_field(self) -> Optional[PhoneField]:
+        """The page's field, for a phone's typing sheet: the API key (secret: never its text)
+        or what is searched for. Typing anywhere on the page goes into it, so it is offered
+        quiet while the keys are on the lists or a button."""
+        if self.isHidden():
+            return None
+        quiet = self._focus != "field"
+        if self._page == KEY_PAGE:
+            return PhoneField(self, KEY_PAGE, translate(KEY_PLACEHOLDER), "", True, quiet)
+        label = translate(QUERY_PLACEHOLDER)
+        return PhoneField(self, RESULTS_PAGE, label, self._query, False, quiet)
+
+    def phone_type(self, key: str, text: str) -> bool:
+        """The phone's text in place of the field's (a key loses its spaces, as one pasted)."""
+        if self.isHidden() or key != self._page:
+            return False
+        if self._page == KEY_PAGE:
+            self._key = "".join(text.split())
+            self._message = ""
+        else:
+            self._query = text
+        self._focus = "field"
+        self.update()
+        return True
 
     # ---- the keys -----------------------------------------------------------------------------
 

@@ -7,7 +7,10 @@ box's holder answers with a `PhoneField` (Open Link's and the other cards' field
 edited in place, the channel list's Find box once it shows a caret). The holder takes the phone's
 text in place of the box's own (`holder.phone_type(key, text)`) through the path its keys take,
 so what follows a change (Open Link's found line, the find's lists) follows it too. A secret
-box's text is never in a `PhoneField`: only that it is secret. GUI thread only; no widgets.
+box's text is never in a `PhoneField`: only that it is secret. A box that typing would start
+(the channel list's Find box before its caret, Settings' find, the Library's search, the
+OpenSubtitles search's field) is offered `quiet`: the phone's sheet waits for a tap there, so it
+never covers the phone's buttons as such a page opens. GUI thread only; no widgets.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ _ABOVE = (
     "quality_panel",
     "captions_card",
     "popup_menu",
+    "library_menu",
 )
 
 
@@ -36,22 +40,24 @@ _ABOVE = (
 class PhoneField:
     """The text box the keys type into: its holder and its key there, what the phone's typing
     sheet calls it (its label, else its placeholder, else its card's title), its text ("" for a
-    secret one, never shown) and whether it is secret (a password: the phone's field is
-    masked)."""
+    secret one, never shown), whether it is secret (a password: the phone's field is masked),
+    and whether it is `quiet` (typing would start it: offered, the sheet waits for a tap)."""
 
     holder: Any
     key: str
     label: str
     text: str = field(default="", repr=False)
     secret: bool = False
+    quiet: bool = False
 
     def same_box(self, other: Optional[PhoneField]) -> bool:
-        """`other` is this box, as it was named: the same holder's same key, label and kind
-        (its text may have changed, by the phone's typing among others)."""
+        """`other` is this box, as it was named: the same holder's same key, label and kind,
+        quiet or not (its text may have changed, by the phone's typing among others)."""
         return (
             other is not None
             and other.holder is self.holder
-            and (other.key, other.label, other.secret) == (self.key, self.label, self.secret)
+            and (other.key, other.label, other.secret, other.quiet)
+            == (self.key, self.label, self.secret, self.quiet)
         )
 
     def message(self, number: int) -> dict:
@@ -62,6 +68,8 @@ class PhoneField:
             message["secret"] = True
         else:
             message["text"] = self.text[:MAX_TYPED]
+        if self.quiet:
+            message["quiet"] = True
         return message
 
 
@@ -73,11 +81,18 @@ def focused_field(window: Any) -> Optional[PhoneField]:
         if above is not None and above.isVisible():
             return None
     controller = getattr(window, "controller", None)
-    asked = getattr(controller, "phone_field", None)
-    if not callable(asked):
-        return None
-    found = asked()
-    return found if isinstance(found, PhoneField) else None
+    screens = getattr(window, "screens", None)
+    if screens is not None and screens.library_shown():
+        # The window's order over the Library: a question there, Settings over it, the Library.
+        cards = getattr(window, "window_cards", None)
+        asking = getattr(cards, "library_card", None)
+        if asking is not None and asking.isVisible():
+            return None
+        settings = getattr(window, "settings", None)
+        if settings is not None and settings.visible():
+            return field_of(getattr(controller, "settings_layer", None))
+        return field_of(getattr(window, "library_controller", None))
+    return field_of(controller)
 
 
 def field_of(holder: Any) -> Optional[PhoneField]:

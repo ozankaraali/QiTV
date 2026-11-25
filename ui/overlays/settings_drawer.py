@@ -153,6 +153,9 @@ SETTINGS_TITLE = N_("Settings")
 RESTART_NOTE = N_("Applies when QiTV starts again.")
 # i18n: in Settings' right column while what was typed finds no setting; {typed} is what was typed
 NO_SETTING_FOUND = N_("No setting has “{typed}”")
+# i18n: the phone remote's typing sheet over Settings: what typing there does (finds a setting)
+FIND_SETTING_TEXT = N_("Find a setting")
+_PHONE_FIND = "@find"  # 2.15: the find, as a phone types into it (no row's key)
 MASK = "•"  # a secret text's every character, as a FormCard's secret field shows it
 SECRET_DOTS = 8  # the dots before a secret's end that shows (Row.secret_tail), whatever its length
 
@@ -426,11 +429,16 @@ class SettingsDrawer(Overlay):
         return self._edit is not None
 
     def phone_field(self) -> Optional[PhoneField]:
-        """2.15: the text being edited, for a phone's typing sheet (ui/remote_typing.py): named
-        by its row's title; a secret one without its text."""
-        edit = self._edit
-        if edit is None or not self.isVisible():
+        """2.15: the box Settings' keys type into, for a phone's typing sheet
+        (ui/remote_typing.py): the text being edited, named by its row's title (a secret one
+        without its text); else the find, which typing starts: offered quiet until it shows
+        (the sheet waits for a tap, so it never covers the phone's buttons as Settings opens)."""
+        if not self.isVisible():
             return None
+        edit = self._edit
+        if edit is None:
+            label = translate(FIND_SETTING_TEXT)
+            return PhoneField(self, _PHONE_FIND, label, self.find_text(), quiet=self._find is None)
         row = next((r for r in self._right_rows() if r.key == self._edit_row), None)
         if row is None:
             return None
@@ -440,7 +448,20 @@ class SettingsDrawer(Overlay):
 
     def phone_type(self, key: str, text: str) -> bool:
         """2.15: the phone's text in place of the edited text of row `key` (kept as Enter keeps
-        it, or put back as Esc does, as a typed one is)."""
+        it, or put back as Esc does, as a typed one is), or of the find's (as typing finds: a
+        space alone starts none; all of it deleted ends it, as its last letter's Backspace)."""
+        if key == _PHONE_FIND and self._edit is None:
+            if not text.strip():
+                if self._find is not None:
+                    self.end_find()
+                return True
+            if self._find is None:
+                self._start_find(text)
+            elif self._find.text != text:
+                self._find.set_text(text)
+                self._match()
+            self._find_shown()
+            return True
         edit = self._edit
         if edit is None or key != self._edit_row:
             return False

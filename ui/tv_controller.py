@@ -1818,6 +1818,11 @@ class TVController(QObject):
             return "drawer"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
 
+    def tv_waits_for(self, target: Target) -> bool:
+        """2.15: the large picture waits for `target`'s channel to be live (a phone's wait for
+        it gives way: one asks)."""
+        return not self._closed and self._live_controls.waits_for(target)
+
     def phone_field(self) -> Any:
         """2.15: the text box a typed letter goes into now, in `handle`'s order, for a phone's
         typing sheet (ui/remote_typing.py; its questions and menus are asked first there): a
@@ -1827,7 +1832,9 @@ class TVController(QObject):
         card = self._shown_card()
         if card is not None:
             return field_of(card)
-        if (self._online is not None and self._online.visible()) or self._guide.is_open():
+        if self._online is not None and self._online.visible():
+            return self._online.phone_field()  # the OpenSubtitles search's field
+        if self._guide.is_open():
             return None
         if self.settings_layer.shown():
             return self.settings_layer.phone_field()
@@ -6340,7 +6347,9 @@ class TVController(QObject):
         # 2.14: a phone gets a Plex title through QiTV's home door, which passes its file (the
         # server's conversion is a playlist of pieces on the server): as it is.
         target = self._as_its_file(self._owned_target(target))  # a link: whose stream it is now
-        chosen = target
+        # 2.15: each phone's ask its own (a copy): its `failed` hears its own answer, and a
+        # second ask for the same target (another phone's) is asked, not dropped as the same.
+        chosen = replace(target) if failed is not None else target
         if target.local:
             path = str(target.item.get("path") or "")
             if not (recordings and target.item.get("_recording") and path):
@@ -6361,7 +6370,7 @@ class TVController(QObject):
 
         if failed is not None:  # (the newest few: one that never answers is not kept for ever)
             self._elsewhere_failed = [*self._elsewhere_failed[-7:], (chosen, failed)]
-        self._lanes.request_side(target, play, play=again is None)
+        self._lanes.request_side(chosen, play, play=again is None)
         return True
 
     def _play_external(

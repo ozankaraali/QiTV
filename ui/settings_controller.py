@@ -290,12 +290,12 @@ class SettingsController(QObject):
 
     def phone_field(self) -> Optional[PhoneField]:
         """2.15: the text box Settings' keys type into, for a phone's typing sheet: the field
-        of the card over it (none while it asks), else the text edited in place (none while the
-        rows have the keys: typing there finds a setting)."""
+        of the card over it (none while it asks), else the text edited in place, else its find
+        (typing there finds a setting: offered quiet until it shows)."""
         card = self._card()
         if card is not None:
             return field_of(card)
-        return self._drawer.phone_field() if self._drawer.editing() else None
+        return self._drawer.phone_field()
 
     def _card(self) -> Optional[Card]:
         """The card on top, of those in sight (a card hides itself when it is done). One whose

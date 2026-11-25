@@ -3,11 +3,13 @@
 Before, it failed. Now the phone says "This channel isn't live now · It plays as soon as it's
 live", and QiTV asks the site again as the large picture does (ui/live_controls.py's
 OFFLINE_ASK_S and its jitter): after at least 30 s, one ask at a time, the next only once the
-last answered, and none while the phone is away (its page closed: asked again once it is back).
-The phone holds no stream meanwhile. Once the site has a stream, the phone is handed it as any
-Watch is. A wait is the phone's (its device's: a phone that slept comes back as another
-session), and ends when it asks for something else, hands back to the TV, leaves for good or is
-unpaired, and when its site says something else than "not live" (said as ever).
+last answered, and none while every phone waiting is away (its page closed: asked again once one
+is back). A wait is the channel's: the phones waiting for it (by device: a phone that slept comes
+back as another session) share its asks. The phones hold no stream meanwhile. Once the site has
+a stream, it plays on one phone, the one that asked last (one screen at a time); the others are
+told another screen took over. A phone's wait ends when it asks for something else, hands back
+to the TV, leaves for good or is unpaired; the channel's when its site says something else than
+"not live", and when the TV plays something else (one screen at a time).
 
 GUI thread only: the timers are made here, never on a worker.
 """
@@ -32,107 +34,162 @@ LOST_S = 90.0  # an ask with no answer this long (dropped on its way) is made ag
 
 @dataclass(eq=False)
 class SiteWait:
-    """What one phone waits for: the channel (a Target) and the group it was picked in."""
+    """One channel waited for: the channel (a Target), the group it was picked in, the phones
+    waiting for it (the last to ask last), and what the TV showed as the wait began (`tv`:
+    the TV playing something else since ends it)."""
 
     target: Any
     group: Optional[tuple[str, list]] = field(default=None, repr=False)
+    devices: list[str] = field(default_factory=list)
+    tv: Any = field(default=None, repr=False)
     asking: bool = False  # an ask is on its way: the next waits for its answer
+    timer: Optional[QTimer] = field(default=None, repr=False)
 
 
-# `ask(device, wait)`: ask the site again for `wait`'s channel for phone `device`; False when it
-# could not be asked now (the phone is away), and the wait goes on to the next time.
-Ask = Callable[[str, SiteWait], bool]
+# `ask(wait)`: ask the site again for `wait`'s channel; False when it could not be asked now
+# (every phone waiting is away), and the wait goes on to the next time.
+Ask = Callable[[SiteWait], bool]
 
 
 class SiteWaits(QObject):
-    """The phones that wait for a site's channel to be live, by device."""
+    """The channels phones wait for to be live."""
 
     def __init__(self, ask: Ask, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._ask = ask
-        self._waits: dict[str, SiteWait] = {}
-        self._timers: dict[str, QTimer] = {}
+        self._waits: list[SiteWait] = []
 
-    def waiting(self, device: str) -> bool:
-        return device in self._waits
+    def waits(self) -> list[SiteWait]:
+        return list(self._waits)
 
     def wait_of(self, device: str) -> Optional[SiteWait]:
-        return self._waits.get(device)
+        """The wait phone `device` is one of (None: it waits for nothing)."""
+        return next((wait for wait in self._waits if device in wait.devices), None)
+
+    def waiting(self, device: str) -> bool:
+        return self.wait_of(device) is not None
+
+    def current(self, wait: SiteWait) -> bool:
+        return any(wait is other for other in self._waits)
 
     def failed(
-        self, device: str, target: Any, group: Optional[tuple[str, list]], why: str
+        self,
+        device: str,
+        target: Any,
+        group: Optional[tuple[str, list]],
+        why: str,
+        tv: Any = None,
     ) -> Optional[bool]:
-        """Why phone `device`'s ask for `target` failed (as it is kept: English): True when
-        its wait begins (the site says it isn't live now), False when it waits on (asked again
-        while waiting, the site still says so, or never answered: as the large picture waits
-        on), None for anything else (its wait, if any, ends: the reason is said as ever)."""
-        wait = self._waits.get(device)
-        same = wait is not None and ZapContext.same(wait.target.item, target.item)
-        if not (is_offline(why) or (same and why in (TIMED_OUT, FAILED))):
+        """Why phone `device`'s own ask for `target` (its Watch) failed (as it is kept:
+        English): True when it begins to wait (the site says the channel isn't live now; a
+        channel another phone waits for already is waited for together), False when it waits
+        on (it waited for it already: the site still says so, or never answered), None for
+        anything else (its wait, if any, ends: the reason is said as ever)."""
+        mine = self.wait_of(device)
+        channel = self._of_channel(target)
+        waits_on = mine is not None and mine is channel
+        if not (is_offline(why) or (waits_on and why in (TIMED_OUT, FAILED))):
             self.end(device)
             return None
-        if not same:
+        if mine is not None and mine is not channel:
             self.end(device)
-            wait = SiteWait(target, group)
-            self._waits[device] = wait
-        assert wait is not None
-        wait.asking = False
+        if channel is None:
+            channel = SiteWait(target, group, tv=tv)
+            self._waits.append(channel)
+        if device in channel.devices:
+            channel.devices.remove(device)
+        channel.devices.append(device)  # the last to ask: the one it plays on once it is live
+        channel.asking = False
         delay = _next_ask()
+        self._arm(channel, delay)  # (it was just asked: the next after the calm wait)
         logger.info(
             "%s is not live now (a phone's); asking its site again in %.0f s", target.title, delay
         )
-        self._arm(device, delay)
-        return not same
+        return not waits_on
 
-    def take(self, device: str, wait: SiteWait) -> bool:
-        """The site gave `wait`'s channel a stream: True (and the wait is over) while it is
-        still the phone's wait; False when it ended meanwhile (the stream is not handed on)."""
-        if self._waits.get(device) is not wait:
+    def answered(self, wait: SiteWait, why: str) -> Optional[bool]:
+        """The channel's ask again got no stream: False when it waits on (the site says it
+        isn't live, or never answered), None for anything else: the wait ends (the caller
+        tells its phones). An answer to a wait that ended meanwhile: False, nothing changes."""
+        if not self.current(wait):
             return False
-        self.end(device)
-        return True
+        if is_offline(why) or why in (TIMED_OUT, FAILED):
+            wait.asking = False
+            self._arm(wait, _next_ask())
+            return False
+        self._drop(wait)
+        return None
+
+    def take(self, wait: SiteWait) -> Optional[list[str]]:
+        """The site gave the channel a stream: its phones (the last to ask last), and the wait
+        is over; None when it ended meanwhile (the stream is not handed on)."""
+        if not self.current(wait):
+            return None
+        devices = list(wait.devices)
+        self._drop(wait)
+        return devices
 
     def end(self, device: str) -> None:
-        """Phone `device` waits no more (nothing is asked for it again)."""
-        self._waits.pop(device, None)
-        timer = self._timers.pop(device, None)
-        if timer is not None:
-            timer.stop()
-            timer.deleteLater()
+        """Phone `device` waits no more; a channel no phone waits for is asked for no more."""
+        wait = self.wait_of(device)
+        if wait is None:
+            return
+        wait.devices.remove(device)
+        if not wait.devices:
+            self._drop(wait)
+
+    def end_wait(self, wait: SiteWait) -> list[str]:
+        """The channel is waited for no more (the TV took over): its phones."""
+        if not self.current(wait):
+            return []
+        devices = list(wait.devices)
+        self._drop(wait)
+        return devices
 
     def end_all(self) -> None:
-        for device in list(self._waits):
-            self.end(device)
+        for wait in list(self._waits):
+            self._drop(wait)
 
     def keep_only(self, devices: set[str]) -> None:
         """The paired phones are `devices`: those unpaired wait no more."""
-        for device in list(self._waits):
-            if device not in devices:
-                self.end(device)
+        for wait in list(self._waits):
+            for device in list(wait.devices):
+                if device not in devices:
+                    self.end(device)
 
-    def _arm(self, device: str, seconds: float) -> None:
-        timer = self._timers.get(device)
-        if timer is None:
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.timeout.connect(lambda device=device: self._due(device))
-            self._timers[device] = timer
-        timer.start(round(seconds * 1000))
+    def _of_channel(self, target: Any) -> Optional[SiteWait]:
+        return next(
+            (wait for wait in self._waits if ZapContext.same(wait.target.item, target.item)),
+            None,
+        )
 
-    def _due(self, device: str) -> None:
-        wait = self._waits.get(device)
-        if wait is None:
+    def _drop(self, wait: SiteWait) -> None:
+        self._waits = [other for other in self._waits if other is not wait]
+        if wait.timer is not None:
+            wait.timer.stop()
+            wait.timer.deleteLater()
+            wait.timer = None
+
+    def _arm(self, wait: SiteWait, seconds: float) -> None:
+        if wait.timer is None:
+            wait.timer = QTimer(self)
+            wait.timer.setSingleShot(True)
+            wait.timer.timeout.connect(lambda wait=wait: self._due(wait))
+        wait.timer.start(round(seconds * 1000))
+
+    def _due(self, wait: SiteWait) -> None:
+        if not self.current(wait):
             return
         wait.asking = True
-        self._arm(device, LOST_S)  # its answer arms the next ask; none by then: asked again
+        self._arm(wait, LOST_S)  # its answer arms the next ask; none by then: asked again
         try:
-            asked = self._ask(device, wait)
+            asked = self._ask(wait)
         except Exception as error:  # a phone's wait must never take QiTV down
             logger.error("A phone's wait for a channel: asking failed (%s)", type(error).__name__)
             asked = False
-        if not asked and self._waits.get(device) is wait:
+        if not asked and self.current(wait) and wait.asking:
             wait.asking = False
-            self._arm(device, _next_ask())  # away: asked once it is back, at the next turn
+            self._arm(wait, _next_ask())  # every phone away: asked once one is back, next turn
 
 
 def _next_ask() -> float:

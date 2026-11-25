@@ -1095,12 +1095,15 @@ class Drawer(Overlay):
         self._end_find()
 
     def phone_field(self) -> PhoneField | None:
-        """2.15: the Find box, for a phone's typing sheet (ui/remote_typing.py), while it shows
-        a caret (clicked, or typed into); not merely while the list shows, whose keys the
-        phone's buttons move (the sheet would cover them)."""
-        if not self.isVisible() or not (self._find_open or self.find_text):
+        """2.15: the Find box, for a phone's typing sheet (ui/remote_typing.py): typing finds
+        whichever column has the keys, so while the list shows it is offered quiet (the sheet
+        waits for a tap: the phone's buttons move the list), and once it shows a caret
+        (clicked, or typed into) it has the keys."""
+        if not self.isVisible():
             return None
-        return PhoneField(self, "find", translate(FIND_PLACEHOLDER), self.find_text)
+        caret = self._find_open or bool(self.find_text)
+        label = translate(FIND_PLACEHOLDER)
+        return PhoneField(self, "find", label, self.find_text, quiet=not caret)
 
     def phone_type(self, key: str, text: str) -> bool:
         """2.15: the phone's text in place of the Find box's, as typing finds; the box keeps

@@ -1583,6 +1583,24 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertIsNone(self.pill_text())
         self.assertEqual(self.errors(), [])
 
+    def test_two_phones_asking_for_one_target_each_hear_their_own_answer(self):
+        # Review 4: each phone's ask is its own: two asks for the same Target (two phones'
+        # Watch of what the TV plays) are both asked, and each hook hears its own answer once.
+        target = Target(self.kept_item(), "live", "examplechannel · Kick")
+        heard = {"a": [], "b": []}
+        self.answers = [SiteError("offline"), SiteError("offline")]
+        for name in ("a", "b"):
+            self.controller.play_elsewhere(
+                lambda _t, _url: (True, ""),
+                target,
+                failed=lambda _t, why, name=name: heard[name].append(why) or True,
+                again=lambda: True,
+            )
+        self.assertTrue(wait_until(lambda: heard["a"] and heard["b"]))
+        pause(100)
+        self.assertEqual(heard, {"a": [OFFLINE], "b": [OFFLINE]})
+        self.assertEqual(len(self.asked), 2)
+
     def test_a_waiting_phones_ask_drops_no_choice_of_the_tvs(self):
         # 2.15: its asks go beside the TV's choices (the TV's zap meanwhile still opens), and
         # once live its stream is handed on only while the phone still waits for it.
