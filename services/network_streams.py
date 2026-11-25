@@ -5,7 +5,10 @@ it can be played again, renamed or removed. It is not a provider: the providers 
 reads this file.
 
 An entry's id comes from where the link points, not from its token: a link handed out with a
-fresh `?token=` each day is still the same entry, and keeping it again updates its address.
+fresh `?token=` each day is still the same entry, and keeping it again updates its address. A
+Kick or Twitch channel's page is one entry however it is written (`www.`, letter case, a query:
+by its page's own address), and rows an older build kept of one channel under several spellings
+merge into one as the file is read (`load`, `merge`), under an id one of them had.
 The file is versioned ({"v": 1, "entries": [...]}; an older build skips what it does not
 know). A missing file reads as empty, and so does an unreadable one, which is `broken`: it is
 set aside before the first write over it (`save`). A row without an id or an address is left
@@ -36,7 +39,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 from services.atomic_write import atomic_write, set_aside as set_file_aside
 from services.i18n import N_, translate
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
-from services.live_sites import SITE_NAMES, SitePage, page_name, site_page
+from services.live_sites import SITE_NAMES, SitePage, page_address, page_name, site_page
 from services.provider_ids import NETWORK_PROVIDER, provider_of
 
 logger = logging.getLogger(__name__)
@@ -96,7 +99,11 @@ def stream_id(url: str) -> str:
     scheme here (a provider that serves both is one stream), host is lower-cased, a default
     port and the fragment are dropped. The query counts only when the last path segment has
     no extension or is a script (.php, .aspx, .jsp), where it names the stream; elsewhere it
-    is a token that changes."""
+    is a token that changes. A site's channel page is its page's own address (`page_address`:
+    "www.", "m.", letter case and a query name no other channel)."""
+    page = site_page(url)
+    if page is not None:
+        url = page_address(page)
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     try:
@@ -196,6 +203,12 @@ def _site_pattern(text: str) -> re.Pattern[str]:
     for field, group in _SITE_FIELDS.items():
         pattern = pattern.replace(re.escape("{" + field + "}"), group)
     return re.compile(pattern)
+
+
+def is_offline(why: str) -> bool:
+    """Whether `why` is a site's answer that the channel is not live now (`SITE_OFFLINE`)."""
+    found = _site_reason(why)
+    return found is not None and found[0] == SITE_OFFLINE
 
 
 def names_its_channel(why: str) -> bool:
@@ -307,8 +320,10 @@ class NetworkStreams:
                 entry = None
             if entry is not None:
                 self._entries[entry.id] = entry
-        if len(self._entries) < len(rows):
-            logger.info("Left out %d unreadable network stream(s)", len(rows) - len(self._entries))
+        read = len(self._entries)
+        if read < len(rows):
+            logger.info("Left out %d unreadable network stream(s)", len(rows) - read)
+        self._merge_sites()
         return True
 
     def merge(self, data: bytes) -> bool:
@@ -324,7 +339,37 @@ class NetworkStreams:
                 if stored is not None:
                     entry.name = stored.name or entry.name
                 self._entries[key] = entry
+            self._merge_sites()  # (one kept meanwhile may be a spelling the file has too)
         return loaded
+
+    def _merge_sites(self) -> None:
+        """The rows of one site channel (older builds kept "www.", letter case and a query
+        apart) become one: under its page's own id when one row has it, else the id of the
+        one that played last (Recent, favourites and the parental lock key by an id it had).
+        It keeps the name the viewer gave one, the newest play and how that went."""
+        groups: dict[str, list[Entry]] = {}
+        for entry in self._entries.values():
+            page = site_page(entry.url)
+            if page is not None:
+                groups.setdefault(stream_id(page_address(page)), []).append(entry)
+        for key, rows in groups.items():
+            if len(rows) < 2:
+                continue
+            newest = max(rows, key=lambda e: e.opened)
+            kept = next((e for e in rows if e.id == key), newest)
+            given = [e.name for e in rows if e.name and e.name != default_name(e.url)]
+            if kept.name in given or not given:
+                name = kept.name or default_name(kept.url)
+            else:
+                name = next(
+                    (e.name for e in sorted(rows, key=lambda e: -e.opened) if e.name in given)
+                )
+            kept.name, kept.url, kept.kind = name, newest.url, LIVE
+            kept.opened, kept.failed = newest.opened, newest.failed
+            for entry in rows:
+                if entry is not kept:
+                    del self._entries[entry.id]
+            logger.info("Merged %d network stream rows of one site channel", len(rows))
 
     def save_bytes(self) -> bytes:
         rows = [asdict(e) for e in self._entries.values()]
@@ -344,6 +389,9 @@ class NetworkStreams:
         kind = FILM if kind == FILM else LIVE
         id = stream_id(url)
         entry = self._entries.get(id)
+        if entry is None and site_page(url) is not None:
+            # A site channel's row kept under an older build's id for another spelling.
+            entry = next((e for e in self._entries.values() if stream_id(e.url) == id), None)
         if entry is None:
             entry = Entry(id, name or default_name(url), url, kind)
             self._entries[id] = entry

@@ -258,5 +258,115 @@ class StoreTests(unittest.TestCase):
         self.assertFalse(ns.names_its_channel("The link didn't answer in time"))
 
 
+class SiteSpellingTests(unittest.TestCase):
+    """Owner 2026-11-25: one site channel saved under several spellings (www., letter case, a
+    query) is one row of Network streams, keyed by its page; older builds' duplicates merge as
+    the list loads, under an id one of them had (what else keys by it stays), and the file stays
+    one older 2.x builds read."""
+
+    PAGES = (
+        "https://kick.com/examplechannel",
+        "https://www.kick.com/ExampleChannel",
+        "kick.com/examplechannel?ref=share",
+        "https://m.kick.com/examplechannel/",
+    )
+
+    @staticmethod
+    def old_id(url):
+        """The id an older build gave the row: its address alone, as any link's."""
+        with mock.patch.object(ns, "site_page", lambda url: None):
+            return stream_id(url)
+
+    def test_a_site_channels_spellings_are_one_stream(self):
+        ids = {stream_id(page) for page in self.PAGES}
+        self.assertEqual(ids, {stream_id("https://kick.com/examplechannel")})
+        self.assertEqual(
+            stream_id("https://twitch.tv/OtherChannel"),
+            stream_id("https://www.twitch.tv/otherchannel"),
+        )
+        self.assertNotEqual(
+            stream_id("https://kick.com/examplechannel"), stream_id("https://kick.com/otherchannel")
+        )
+        self.assertNotEqual(  # (another site's channel of that name is another stream)
+            stream_id("https://kick.com/examplechannel"),
+            stream_id("https://twitch.tv/examplechannel"),
+        )
+        # The way it is written most often keeps the id older builds gave it.
+        page = "https://kick.com/examplechannel"
+        self.assertEqual(stream_id(page), self.old_id(page))
+
+    def rows(self, *rows):
+        return json.dumps({"v": 1, "entries": list(rows)}).encode("utf-8")
+
+    def test_older_builds_duplicates_merge_as_the_list_loads(self):
+        www, plain = self.PAGES[1], "https://kick.com/examplechannel?ref=x"
+        data = self.rows(
+            {"id": self.old_id(www), "name": "Evening show", "url": www, "kind": "LIVE",
+             "opened": 10.0, "failed": ""},
+            {"id": self.old_id(plain), "name": "examplechannel · Kick", "url": plain,
+             "kind": "LIVE", "opened": 30.0, "failed": "examplechannel isn't live now"},
+            {"id": "other", "name": "B", "url": "http://h.example/b.ts", "kind": "LIVE"},
+        )  # fmt: skip
+        store = NetworkStreams(Path("unused.json"))
+        self.assertTrue(store.load(data))
+        kept = [e for e in store.entries() if e.id != "other"]
+        self.assertEqual(len(kept), 1)
+        entry = kept[0]
+        self.assertIn(entry.id, (self.old_id(www), self.old_id(plain)))  # one it had
+        self.assertEqual(entry.name, "Evening show")  # the name given, not the default
+        self.assertEqual(entry.opened, 30.0)  # the newest play
+        self.assertEqual(entry.failed, "examplechannel isn't live now")  # and how it went
+        self.assertEqual(entry.kind, "LIVE")
+        self.assertEqual(len(store.entries()), 2)
+        # Playing it again by any spelling keeps it in that one row.
+        again = store.keep(self.PAGES[3], "", "LIVE")
+        self.assertEqual(again.id, entry.id)
+        self.assertEqual(len(store.entries()), 2)
+        # Saved as older 2.x builds read it: the same format, one row for the channel.
+        saved = json.loads(store.save_bytes())
+        self.assertEqual(saved["v"], 1)
+        self.assertEqual(len(saved["entries"]), 2)
+        self.assertEqual(
+            set(saved["entries"][0]), {"id", "name", "url", "kind", "opened", "failed"}
+        )
+
+    def test_the_row_under_its_pages_own_id_is_the_one_kept(self):
+        page, www = "https://kick.com/examplechannel", self.PAGES[1]
+        data = self.rows(
+            {"id": self.old_id(www), "name": "examplechannel · Kick", "url": www, "kind": "LIVE",
+             "opened": 50.0},
+            {"id": stream_id(page), "name": "examplechannel · Kick", "url": page, "kind": "LIVE",
+             "opened": 5.0},
+        )  # fmt: skip
+        store = NetworkStreams(Path("unused.json"))
+        store.load(data)
+        self.assertEqual([e.id for e in store.entries()], [stream_id(page)])
+        self.assertEqual(store.get(stream_id(page)).opened, 50.0)
+
+    def test_a_row_kept_while_the_file_was_read_merges_with_its_duplicate(self):
+        www = self.PAGES[1]
+        data = self.rows(
+            {"id": self.old_id(www), "name": "Evening show", "url": www, "kind": "LIVE",
+             "opened": 10.0},
+        )  # fmt: skip
+        store = NetworkStreams(Path("unused.json"))
+        played = store.keep("https://kick.com/examplechannel", "", "LIVE")  # before the read
+        store.opened(played.id, 60.0)
+        self.assertTrue(store.merge(data))
+        entries = store.entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual((entries[0].name, entries[0].opened), ("Evening show", 60.0))
+
+    def test_other_links_of_one_stream_are_left_as_they_are(self):
+        # (Two rows of one stream may be the viewer's: a link whose address was replaced.)
+        data = self.rows(
+            {"id": "a", "name": "A", "url": "http://h.example/a.ts?token=1", "kind": "LIVE"},
+            {"id": "b", "name": "B", "url": "http://h.example/a.ts?token=2", "kind": "LIVE"},
+        )
+        store = NetworkStreams(Path("unused.json"))
+        store.load(data)
+        self.assertEqual(len(store.entries()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
