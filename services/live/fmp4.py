@@ -12,6 +12,10 @@ rewind. `Fmp4Remuxer` turns them into TS as they come, one segment at a time:
   init's parameter sets before each keyframe that has none (`annex_b`); AAC gets ADTS headers;
   AC-3, E-AC-3 and MPEG audio go as they are. The PCR comes with each video PES (each audio
   PES without video), `_PCR_LEAD` before its DTS, as ffmpeg's muxer writes it.
+- `Fmp4Remuxer.begin`, `feed` and `end` remux a media segment as it comes, a live site's
+  piece being made (Twitch writes its 2 s piece as about twenty moof/mdat pairs, a tenth of a
+  second apart): each moof as soon as its mdat has come, PAT and PMT before the first.
+  However the bytes are cut, the same TS.
 
 Timestamps are each track's media time less its edit list's shift, at 90 kHz modulo 2^33:
 HLS renditions share one timeline, so a separate audio rendition remuxed on its own lines up
@@ -23,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import logging
 import struct
 from typing import NamedTuple
@@ -494,13 +498,69 @@ def read_segment(
 def _read_segment(view: memoryview, tracks: dict[int, Track], ends: dict[int, int]) -> list[Sample]:
     samples: list[Sample] = []
     for kind, moof, body, end in _boxes_at(view):
-        if kind != b"moof":
-            continue
-        data_end = moof  # the first track fragment's data counts from the moof by default
-        for traf_kind, traf, traf_end in _boxes(view, body, end):
-            if traf_kind == b"traf":
-                data_end = _fragment(view, traf, traf_end, moof, data_end, tracks, ends, samples)
+        if kind == b"moof":
+            _read_moof(view, moof, body, end, tracks, ends, samples)
     return samples
+
+
+def _read_moof(
+    view: memoryview,
+    moof: int,
+    body: int,
+    end: int,
+    tracks: dict[int, Track],
+    ends: dict[int, int],
+    samples: list[Sample],
+) -> None:
+    """One `moof`'s samples (the box at `moof`, its children from `body` to `end`) onto
+    `samples`; `view` is its segment's bytes from the segment's start (a base-data-offset
+    counts from there)."""
+    data_end = moof  # the first track fragment's data counts from the moof by default
+    for traf_kind, traf, traf_end in _boxes(view, body, end):
+        if traf_kind == b"traf":
+            data_end = _fragment(view, traf, traf_end, moof, data_end, tracks, ends, samples)
+
+
+def _box_at(data: bytearray, at: int, ended: bool) -> tuple[bytes, int, int, int] | None:
+    """(type, start, body start, end) of the top-level box at `at` of a segment's bytes so far
+    (`data`) once it has all come, as `_boxes_at` reads it; None until then, or with fewer than
+    8 bytes left. At the segment's end (`ended`) one cut off is damaged, and a box of size 0
+    runs to that end."""
+    end = len(data)
+    if at + 8 > end:
+        return None
+    size, kind = struct.unpack_from(">I4s", data, at)
+    head = 8
+    if size == 1:
+        if at + 16 > end:
+            if ended:
+                raise Fmp4Error(DAMAGED)
+            return None
+        size = struct.unpack_from(">Q", data, at + 8)[0]
+        head = 16
+    elif size == 0:
+        if not ended:
+            return None
+        size = end - at
+    if size < head:
+        raise Fmp4Error(DAMAGED)
+    if at + size > end:
+        if ended:
+            raise Fmp4Error(DAMAGED)
+        return None
+    return kind, at, at + head, at + size
+
+
+@dataclass
+class _Piece:
+    """A media segment fed as it comes (`Fmp4Remuxer.feed`): its bytes so far, where its next
+    top-level box starts, the moofs read but not yet passed on (start, body start, end), and
+    whether its PAT and PMT went out."""
+
+    data: bytearray = field(default_factory=bytearray)
+    at: int = 0
+    moofs: list[tuple[int, int, int]] = field(default_factory=list)
+    tables: bool = False
 
 
 def _fragment(
@@ -672,10 +732,12 @@ class Fmp4Remuxer:
         self._version = 0
         self._counters = Counters()
         self._ends: dict[int, int] = {}
-        # Each track's DTS shift (PTS never before its DTS), set by its first segment and kept:
-        # DTS and the PCR never step back. A later frame that needs more has its DTS clamped.
+        # Each track's DTS shift (PTS never before its DTS), set by its first segment (one fed
+        # as it comes: its first moof) and kept: DTS and the PCR never step back. A later
+        # frame that needs more has its DTS clamped.
         self._delays: dict[int, int] = {}
         self._clamped = False  # one was (logged once)
+        self._piece: _Piece | None = None  # the segment being fed (`feed`)
         self.segments = 0  # media segments remuxed so far
 
     @property
@@ -729,6 +791,81 @@ class Fmp4Remuxer:
         if not self._tracks:
             raise Fmp4Error(NO_INIT)
         samples = read_segment(view, self._tracks, self._ends)
+        out = self._write(samples, tables=True)
+        self.segments += 1
+        return out
+
+    def begin(self) -> None:
+        """A media segment comes as it is made (a live site's piece, `HlsSource`): `feed` it
+        each part as it comes, then `end` it. One begun before and not ended is dropped."""
+        self._piece = _Piece()
+
+    def feed(self, data: bytes | memoryview) -> bytes:
+        """TS of what `data` completes of the segment begun: each moof, in order, once a box
+        after it (its mdat) has come whole with its samples' data; PAT and PMT before the
+        first; b"" until then. However its bytes are cut, a segment gives the same TS, the
+        same as `remux` gives it whole while no sample of a moof is due after the next moof's
+        first (each moof's samples go in DTS order, not the whole segment's).
+
+        Raises `Fmp4Error` as `remux` does: a box damaged past doubt or encrypted samples at
+        once, a moof whose data never came at the `end`."""
+        with _reading():
+            return self._feed(data, ended=False)
+
+    def end(self) -> bytes:
+        """The segment begun has ended: TS of what is left of it (a box of size 0 runs to
+        here), its tables when nothing went out. Raises `Fmp4Error`: a box cut off, a moof's
+        data past the end, no init read."""
+        try:
+            with _reading():
+                return self._feed(b"", ended=True)
+        finally:
+            self._piece = None
+
+    def _feed(self, data: bytes | memoryview, *, ended: bool) -> bytes:
+        piece = self._piece
+        if piece is None:
+            piece = self._piece = _Piece()
+        piece.data += data
+        came = piece.at
+        while (found := _box_at(piece.data, piece.at, ended)) is not None:
+            kind, start, body, stop = found
+            if kind == b"moov":
+                self.init(bytes(piece.data[start:stop]))
+            elif kind == b"moof":
+                piece.moofs.append((start, body, stop))
+            piece.at = stop
+        out: list[bytes] = []
+        view: memoryview | None = None
+        # A moof waiting for its data is tried again once another box has come whole.
+        while piece.moofs and (ended or piece.at > max(came, piece.moofs[0][2])):
+            if not self._tracks:
+                raise Fmp4Error(NO_INIT)
+            if view is None:  # its own bytes, which no part fed later can move
+                view = memoryview(bytes(piece.data))
+            moof, body, stop = piece.moofs[0]
+            ends = dict(self._ends)
+            samples: list[Sample] = []
+            try:
+                _read_moof(view, moof, body, stop, self._tracks, ends, samples)
+            except Fmp4Error as error:
+                if ended or str(error) != DAMAGED:
+                    raise
+                break  # its data has not all come yet
+            piece.moofs.pop(0)
+            self._ends = ends
+            out.append(self._write(samples, tables=not piece.tables))
+            piece.tables = True
+        if ended:
+            if not self._tracks:
+                raise Fmp4Error(NO_INIT)
+            if not piece.tables:
+                out.append(self._write([], tables=True))
+            self.segments += 1
+        return b"".join(out)
+
+    def _write(self, samples: list[Sample], *, tables: bool) -> bytes:
+        """`samples` as TS, their PES in DTS order, after PAT and PMT with `tables`."""
         delays = self._delays
         seeding: dict[int, int] = {}
         for sample in samples:
@@ -749,10 +886,9 @@ class Fmp4Remuxer:
             for k, sample in enumerate(samples)
         ]
         timed.sort()
-        out = [self._psi(0, self._pat()), self._psi(_PMT_PID, self._pmt())]
+        out = [self._psi(0, self._pat()), self._psi(_PMT_PID, self._pmt())] if tables else []
         for dts, _audio, k in timed:
             out.extend(self._pes(samples[k], dts))
-        self.segments += 1
         return b"".join(out)
 
     def _pat(self) -> bytes:

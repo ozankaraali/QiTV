@@ -28,7 +28,19 @@ from Cryptodome.Util.Padding import pad
 from http_fixtures import LocalSource, leaf, tls_server_context
 import m3u8
 import requests
-from test_fmp4 import FIXTURES, box, elst, frames, full, movie, sound, trak, visual
+from test_fmp4 import (
+    FIXTURES,
+    SITE_INIT,
+    box,
+    elst,
+    frames,
+    full,
+    movie,
+    site_piece,
+    sound,
+    trak,
+    visual,
+)
 import ts_fixtures
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -4769,6 +4781,75 @@ video.m3u8
         self.assertEqual(frames(first)[0x101][0].payload[:2], b"\xff\xf1")  # AAC in ADTS
         self.assertEqual(frames(second)[0x101][0].payload[:2], b"\x0b\x77")  # AC-3
         self.assertEqual((server.counts["/aac.mp4"], server.counts["/ac3.mp4"]), (1, 1))
+
+    # ---- a live site's fMP4 piece being made: passed on fragment by fragment ------------------
+
+    def trickled(self, *, prefetch):
+        """What a source passes on of a live site's fMP4 piece (Twitch's shape: an init
+        section, 2 s pieces, `site_piece`'s four moof/mdat pairs), its body sent a pair every
+        0.3 s, still being made (`prefetch`, the playlist's second piece) or finished (its
+        only one): each TS block with when it came, when the body ended, the piece's TS
+        remuxed whole, and the server."""
+        parts = site_piece(900000)
+        ended = []
+
+        def trickle(request):
+            for index, part in enumerate(parts):
+                if index:
+                    time.sleep(0.3)
+                request.wfile.write(part)
+                request.wfile.flush()
+            ended.append(time.monotonic())
+
+        finished, made = (["s0.mp4"], ["p1.mp4"]) if prefetch else (["p1.mp4"], [])
+        playlist = site_playlist(0, finished, made).replace(
+            b"#EXT-X-MEDIA-SEQUENCE:0\n", b'#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI="init.mp4"\n'
+        )
+        server = self.server(
+            {
+                "/live.m3u8": (200, {}, playlist),
+                "/init.mp4": (200, {}, SITE_INIT),
+                "/s0.mp4": (200, {}, b"".join(site_piece(720000))),
+                "/p1.mp4": (200, {}, trickle),
+            }
+        )
+        stop = threading.Event()
+        timer = threading.Timer(4.0, stop.set)  # a bound: nothing new comes after p1
+        timer.start()
+        source = open_source(server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop)
+        blocks = []
+        try:
+            for item in source.chunks():
+                if isinstance(item, bytes):
+                    blocks.append((time.monotonic(), item))
+                if isinstance(item, CaughtUp) and blocks:  # the piece's batch is done
+                    break
+        finally:
+            source.close()
+            timer.cancel()
+        remuxer = Fmp4Remuxer()
+        remuxer.init(SITE_INIT)
+        return blocks, ended, remuxer.remux(b"".join(parts)), server
+
+    def test_an_fmp4_prefetch_piece_yields_ts_before_its_body_ends(self):
+        # Twitch's re-encoded variants send fMP4, a 2 s piece being made in tenths of a
+        # second: each moof and its mdat pass on as they come, as a TS piece's bytes do,
+        # not once the piece is whole.
+        blocks, ended, whole, server = self.trickled(prefetch=True)
+        self.assertEqual((server.counts["/p1.mp4"], server.counts["/s0.mp4"]), (1, 0))
+        self.assertTrue(blocks and ended)
+        self.assertLess(blocks[0][0], ended[0] - 0.6)  # before the last two pairs were sent
+        self.assertGreaterEqual(len(blocks), 4)  # a block for each pair as it came
+        self.assertEqual(plain(b"".join(block for _, block in blocks)), plain(whole))
+
+    def test_a_finished_fmp4_piece_still_joins_as_today(self):
+        # A finished piece comes whole at once from the site (in well under 0.1 s): it is
+        # remuxed whole, as any fMP4 segment.
+        blocks, ended, whole, server = self.trickled(prefetch=False)
+        self.assertEqual(server.counts["/p1.mp4"], 1)
+        self.assertEqual(len(blocks), 1)
+        self.assertGreaterEqual(blocks[0][0], ended[0])
+        self.assertEqual(plain(blocks[0][1]), plain(whole))
 
 
 class SlicedTlsSocketTests(unittest.TestCase):

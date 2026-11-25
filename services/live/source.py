@@ -1386,7 +1386,7 @@ def _finished(segments: Sequence[Any]) -> int:
 def _with_prefetch(playlist: Any) -> Any:
     """A live media playlist with its prefetch pieces (`_site_tags`) after the finished ones,
     each listed as the piece it will be (titled "prefetch"): the last finished piece's length
-    (none listed: the target duration), key and map (fMP4: remuxed whole, as any), its date
+    (none listed: the target duration), key and map (fMP4: remuxed as it comes), its date
     plus the lengths up to it (none without one), and a discontinuity written before its
     line. A finished playlist (ENDLIST) or a master has none; nor one whose pieces' length is
     not known."""
@@ -1785,7 +1785,10 @@ class HlsSource:
     Fragmented MP4 (CMAF) segments, a playlist with an init section (EXT-X-MAP), are fetched
     whole and remuxed to TS (`Fmp4Remuxer`), the init loaded whenever its URI changes: one
     encrypted (CENC, SAMPLE-AES) or of a codec not remuxed leaves the channel unsupported
-    (direct play) at its first segment, as any segment that is not TS did before.
+    (direct play) at its first segment, as any segment that is not TS did before. A piece
+    still being made (Twitch's re-encoded variants) is remuxed as it comes instead, each moof
+    and its mdat passed on as they arrive (`_remuxing`), unless a separate audio rendition is
+    woven in (that waits for the whole piece).
 
     A master that names a separate default audio playlist is followed to its variant. When the
     variant's first segment lists no audio of its own in its program tables, the separate
@@ -2511,14 +2514,17 @@ class HlsSource:
                 self._capture.mark("discontinuity")
             self._capture.mark("segment", sequence)
         try:
-            if fragmented:
+            weaving = self._audio_unknown or self._weaver is not None
+            if fragmented and _is_prefetch(segment) and not weaving:
+                blocks = self._remuxing(response, decryptor)  # a piece being made, as it comes
+            elif fragmented:
                 blocks = iter([self._remuxed(response, decryptor)])
             elif self._http.station:  # 2.14: a station's TS, or its packed sound as TS
                 read = self._blocks(response, decryptor, self._capture)
                 blocks = self._station_ts(read, float(segment.duration or 0))
             else:
                 blocks = _checked_ts(self._blocks(response, decryptor, self._capture))
-            if self._audio_unknown or self._weaver is not None:
+            if weaving:
                 duration = float(segment.duration or 0)
                 before, woven = self._with_audio(b"".join(blocks), sequence, duration)
                 if before and (block := joiner.feed(before)):  # the timeline before the break
@@ -2622,6 +2628,22 @@ class HlsSource:
         if self._capture is not None:
             self._capture.write(ts)
         return ts
+
+    def _remuxing(self, response: Any, decryptor: _Decryptor | None) -> Iterator[bytes]:
+        """An fMP4 piece being made as TS, each moof and its mdat as they come
+        (`Fmp4Remuxer.feed`): Twitch writes its 2 s piece a tenth of a second at a time, which
+        a whole piece's remux held back until the piece's end. Captured as that TS."""
+        remuxer = self._remuxer
+        remuxer.begin()
+        try:
+            for block in itertools.chain(self._blocks(response, decryptor, None), [None]):
+                ts = remuxer.feed(block) if block is not None else remuxer.end()
+                if ts:
+                    if self._capture is not None:
+                        self._capture.write(ts)
+                    yield ts
+        except Fmp4Error as error:
+            raise _BadSegment(str(error)) from None
 
     def _load_init(self, remuxer: Fmp4Remuxer, init: Any, base: str, loaded: str | None) -> str:
         """Read an fMP4 init section into `remuxer` unless its URI is `loaded` (the one read
