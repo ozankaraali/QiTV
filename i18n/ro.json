@@ -1241,6 +1241,8 @@
   "This title has no file to play.": "Acest titlu nu are niciun fișier de redat.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Acest titlu există doar în 4K. Pentru a-l reda, schimbați Setări → Versiuni 4K (este setat pe Niciodată).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Această versiune rulează din:\n{new}\n\nFolosiți acel fișier de acum înainte sau închideți QiTV și copiați-l peste cel vechi:\n{old}",
+  "This video is gone from {site}": "Acest videoclip nu mai este pe {site}",
+  "This video is private or for subscribers only on {site}": "Acest videoclip este privat sau doar pentru abonați pe {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Prin releul QiTV, care transmite mesaje criptate pe care nu le poate citi.",
   "Tile {number}": "Imaginea {number}",
   "Tiles: 2, 4, 6 or 9": "Imagini: 2, 4, 6 sau 9",

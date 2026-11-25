@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "Bu içeriğin oynatılacak dosyası yok.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Bu içerik yalnızca 4K. Oynatmak için Ayarlar → 4K sürümler ayarını değiştirin (şu an Asla).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Bu sürüm şuradan çalışıyor:\n{new}\n\nBundan sonra bu dosyayı kullanın ya da QiTV'yi kapatıp dosyayı eskisinin üzerine kopyalayın:\n{old}",
+  "This video is gone from {site}": "Bu video artık {site} üzerinde yok",
+  "This video is private or for subscribers only on {site}": "Bu video {site} üzerinde gizli ya da yalnızca abonelere açık",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "QiTV aktarıcısı üzerinden; aktarıcı, okuyamadığı şifreli mesajları iletir.",
   "Tile {number}": "Ekran {number}",
   "Tiles: 2, 4, 6 or 9": "Ekranlar: 2, 4, 6 veya 9",

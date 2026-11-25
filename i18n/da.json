@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Denne titel har ingen fil at afspille.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Denne titel findes kun i 4K. For at afspille den skal du ændre Indstillinger → 4K-versioner (den står på Aldrig).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Denne version kører fra:\n{new}\n\nBrug den fil fremover, eller luk QiTV, og kopiér den over den gamle:\n{old}",
+  "This video is gone from {site}": "Denne video findes ikke længere på {site}",
+  "This video is private or for subscribers only on {site}": "Denne video er privat eller kun for abonnenter på {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Gennem QiTV's relæ, som videresender krypterede beskeder, det ikke kan læse.",
   "Tile {number}": "Felt {number}",
   "Tiles: 2, 4, 6 or 9": "Felter: 2, 4, 6 eller 9",

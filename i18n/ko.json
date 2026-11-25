@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "이 작품에는 재생할 파일이 없어요.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "이 작품은 4K로만 있어요. 재생하려면 설정 → 4K 버전을 바꾸세요 (현재 “재생 안 함”).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "이 버전의 실행 위치:\n{new}\n\n앞으로 이 파일을 쓰거나, QiTV를 닫고 이전 파일 위에 복사하세요:\n{old}",
+  "This video is gone from {site}": "이 동영상은 {site}에 더 이상 없습니다",
+  "This video is private or for subscribers only on {site}": "이 동영상은 {site}에서 비공개이거나 구독자 전용입니다",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "QiTV 릴레이를 거쳐요. 릴레이는 읽을 수 없는 암호화된 메시지를 전달해요.",
   "Tile {number}": "타일 {number}",
   "Tiles: 2, 4, 6 or 9": "타일: 2, 4, 6 또는 9",

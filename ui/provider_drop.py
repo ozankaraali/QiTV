@@ -23,7 +23,7 @@ from collections.abc import Iterable
 import os
 from typing import Optional
 
-from services.link_kind import FILM, LIVE, PROBE, SITE, address, classify
+from services.link_kind import FILM, LIVE, PROBE, SITE, SITE_FILM, address, classify
 from services.provider_changes import normal_address, same_provider, unique_name  # noqa: F401
 from services.provider_link import M3U, STB, XTREAM, ProviderLink, parse_provider_link
 
@@ -38,7 +38,7 @@ def playlist_files(paths: Iterable[str]) -> list[str]:
 def _is_stream(line: str) -> bool:
     """Whether a dropped line is one stream's link (the Open Link card's), not a provider's:
     a Kick or Twitch channel's page too."""
-    return classify(line) in (FILM, LIVE, PROBE, SITE)
+    return classify(line) in (FILM, LIVE, PROBE, SITE, SITE_FILM)
 
 
 def links(texts: Iterable[str]) -> list[ProviderLink]:

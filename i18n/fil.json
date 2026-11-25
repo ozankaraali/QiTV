@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Walang file na ipe-play ang title na ito.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "4K lang ang title na ito. Para i-play ito, baguhin ang Mga Setting → Mga 4K na bersyon (naka-set ito sa Hindi kailanman).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Tumatakbo ang bersyong ito mula sa:\n{new}\n\nGamitin ang file na iyon mula ngayon, o isara ang QiTV at kopyahin ito sa ibabaw ng luma:\n{old}",
+  "This video is gone from {site}": "Wala na ang video na ito sa {site}",
+  "This video is private or for subscribers only on {site}": "Pribado ang video na ito o para lang sa mga subscriber sa {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Sa pamamagitan ng QiTV relay, na nagpapasa ng mga naka-scramble na mensaheng hindi nito mababasa.",
   "Tile {number}": "Tile {number}",
   "Tiles: 2, 4, 6 or 9": "Mga tile: 2, 4, 6 o 9",

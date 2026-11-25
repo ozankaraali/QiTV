@@ -370,3 +370,67 @@ class SiteSpellingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SiteMediaStoreTests(unittest.TestCase):
+    """2.15: a Kick or Twitch video or clip is one row whichever of its pages named it, a film,
+    named by its id until its site gives its title; why it gave none says it plainly."""
+
+    def test_one_video_or_clip_is_one_stream_and_none_other(self):
+        uuid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+        self.assertEqual(
+            stream_id(f"https://kick.com/examplechannel/videos/{uuid}"),
+            stream_id(f"kick.com/video/{uuid}"),
+        )
+        self.assertEqual(
+            stream_id("https://www.twitch.tv/videos/123?t=1h2m"), stream_id("twitch.tv/videos/123")
+        )
+        self.assertEqual(
+            stream_id("https://clips.twitch.tv/Slug"),
+            stream_id("twitch.tv/examplechannel/clip/Slug"),
+        )
+        self.assertNotEqual(stream_id("clips.twitch.tv/Slug"), stream_id("clips.twitch.tv/slug"))
+        self.assertNotEqual(stream_id("twitch.tv/videos/123"), stream_id("twitch.tv/videos/124"))
+        self.assertNotEqual(
+            stream_id("kick.com/examplechannel?clip=clip_1"), stream_id("kick.com/examplechannel")
+        )
+
+    def test_its_name_before_its_title_is_its_id_and_site(self):
+        self.assertEqual(ns.default_name("twitch.tv/videos/123"), "123 · Twitch")
+        self.assertEqual(ns.default_name("kick.com/examplechannel?clip=clip_1"), "clip_1 · Kick")
+
+    def test_why_a_video_did_not_play_is_said_alone_and_translated(self):
+        from services.live_sites import CLIP, VIDEO, SiteMedia
+
+        video = SiteMedia(TWITCH, VIDEO, "123")
+        gone = ns.site_failure("unknown", video)
+        self.assertEqual(gone, "This video is gone from Twitch")
+        private = ns.site_failure("private", SiteMedia(KICK, CLIP, "clip_1"))
+        self.assertEqual(private, "This video is private or for subscribers only on Kick")
+        self.assertEqual(ns.site_failure("refused", video), ns.SITE_REFUSED.format(site="Twitch"))
+        self.assertEqual(ns.site_failure("timeout", video), ns.TIMED_OUT)
+        self.assertEqual(ns.site_failure("network", video), ns.FAILED)
+        for why in (gone, private):
+            self.assertTrue(ns.names_its_channel(why))
+            self.assertTrue(ns.is_site_failure(why))
+            self.assertFalse(ns.is_offline(why))
+        self.addCleanup(i18n.set_language, "en")
+        i18n.set_language("de")
+        self.assertNotEqual(ns.shown_reason(gone), gone)
+        self.assertIn("Twitch", ns.shown_reason(gone))
+
+    def test_an_older_builds_rows_of_one_video_merge_as_a_film(self):
+        rows = [
+            {"id": "aaaa", "name": "x", "url": "https://www.twitch.tv/videos/123", "kind": "LIVE"},
+            {
+                "id": "bbbb",
+                "name": "y",
+                "url": "twitch.tv/videos/123?t=5",
+                "kind": "LIVE",
+                "opened": 5,
+            },
+        ]
+        store = NetworkStreams(Path("unused"))
+        store.load(json.dumps({"v": 1, "entries": rows}).encode("utf-8"))
+        self.assertEqual(len(store.entries()), 1)
+        self.assertEqual(store.entries()[0].kind, "FILM")

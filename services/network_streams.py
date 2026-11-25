@@ -20,7 +20,10 @@ A link that failed stays, with why (`failure_reason`: an English text, shown wit
 translate()). A Kick or Twitch channel's page is kept by its page (never the address with the
 token the site answers as it plays), named by its channel ("examplechannel · Kick"); why the
 site gave no stream (`site_failure`) names the channel too, kept in English with it and shown
-in the active language by `shown_reason`.
+in the active language by `shown_reason`. A Kick or Twitch video's or clip's page (2.15) is kept
+by its own page too, one entry whichever of its pages named it, a film named "title · Twitch"
+once its site answered (the network player renames a row it named); why it gave none says the
+video is gone, or private or for subscribers only.
 """
 
 from __future__ import annotations
@@ -39,7 +42,17 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 from services.atomic_write import atomic_write, set_aside as set_file_aside
 from services.i18n import N_, translate
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
-from services.live_sites import SITE_NAMES, SitePage, page_address, page_name, site_page
+from services.live_sites import (
+    SITE_NAMES,
+    SiteMedia,
+    SitePage,
+    media_key,
+    media_name,
+    page_address,
+    page_name,
+    site_media,
+    site_page,
+)
 from services.provider_ids import NETWORK_PROVIDER, provider_of
 
 logger = logging.getLogger(__name__)
@@ -74,7 +87,14 @@ SITE_OFFLINE = N_("{channel} isn't live now")
 SITE_UNKNOWN = N_("No channel named {channel} on {site}")
 # i18n: a site (Kick, Twitch) refused to give a channel's stream; its own link may be pasted
 SITE_REFUSED = N_("{site} refused QiTV's request: try again later, or paste the stream link")
+# i18n: a video or clip opened by its page (Kick, Twitch) is not there: removed, or never was
+SITE_GONE = N_("This video is gone from {site}")
+# i18n: a video or clip opened by its page (Kick, Twitch) may be watched by its channel's
+# subscribers only, or its channel keeps it private
+SITE_PRIVATE = N_("This video is private or for subscribers only on {site}")
 _SITE_TEXTS = {"offline": SITE_OFFLINE, "unknown": SITE_UNKNOWN, "refused": SITE_REFUSED}
+_MEDIA_TEXTS = {"unknown": SITE_GONE, "private": SITE_PRIVATE, "refused": SITE_REFUSED}
+_ALL_SITE_TEXTS = (SITE_OFFLINE, SITE_UNKNOWN, SITE_REFUSED, SITE_GONE, SITE_PRIVATE)
 _SITE_FIELDS = {
     "channel": r"(?P<channel>[a-z0-9_-]+)",  # (as live_sites reads a channel)
     "site": "(?P<site>" + "|".join(re.escape(name) for name in SITE_NAMES.values()) + ")",
@@ -100,10 +120,14 @@ def stream_id(url: str) -> str:
     port and the fragment are dropped. The query counts only when the last path segment has
     no extension or is a script (.php, .aspx, .jsp), where it names the stream; elsewhere it
     is a token that changes. A site's channel page is its page's own address (`page_address`:
-    "www.", "m.", letter case and a query name no other channel)."""
+    "www.", "m.", letter case and a query name no other channel); a site's video or clip (2.15)
+    is itself, whichever of its pages names it (`media_key`)."""
     page = site_page(url)
     if page is not None:
         url = page_address(page)
+    media = site_media(url) if page is None else None
+    if media is not None:
+        return hashlib.sha1(f"site:{media_key(media)}".encode("utf-8")).hexdigest()[:16]
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     try:
@@ -134,6 +158,9 @@ def default_name(url: str) -> str:
     page = site_page(url)
     if page is not None:
         return page_name(page)
+    media = site_media(url)
+    if media is not None:
+        return media_name(media)  # (2.15: its title once its site answered)
     parts = urlsplit(url.strip())
     host = parts.hostname or url.strip()
     segments = [s for s in parts.path.split("/") if s]
@@ -171,13 +198,17 @@ def failure_reason(message: str, kind: str = "", status: Optional[int] = None) -
     return FAILED
 
 
-def site_failure(reason: str, page: SitePage) -> str:
+def site_failure(reason: str, page: SitePage | SiteMedia) -> str:
     """Why the site gave no stream for the channel `page` (live_sites.SiteError's `reason`:
     "offline", "unknown", "refused"; "timeout", a site that never answered in time; "network"
     and anything else), in English, a site's own answer with the channel and the site in it
-    (`shown_reason` shows it in the active language)."""
+    (`shown_reason` shows it in the active language). For a video or clip (2.15): it is gone
+    ("unknown"), private or for subscribers only ("private"), or refused."""
     if reason == "timeout":
         return TIMED_OUT
+    if isinstance(page, SiteMedia):
+        text = _MEDIA_TEXTS.get(reason)
+        return FAILED if text is None else text.format(site=SITE_NAMES[page.site])
     text = _SITE_TEXTS.get(reason)
     if text is None:
         return FAILED  # not reached (no address, no connection, no TLS), and nothing more known
@@ -191,7 +222,7 @@ def is_site_failure(why: str) -> bool:
 
 def _site_reason(why: str) -> Optional[tuple[str, dict[str, str]]]:
     """The site's text `why` was made of (`site_failure`) and its fields; None for another."""
-    for text in _SITE_TEXTS.values():
+    for text in _ALL_SITE_TEXTS:
         found = _site_pattern(text).fullmatch(why)
         if found is not None:
             return text, found.groupdict()
@@ -212,7 +243,8 @@ def is_offline(why: str) -> bool:
 
 
 def names_its_channel(why: str) -> bool:
-    """Whether why a link failed names its channel itself (a site's answer): said alone."""
+    """Whether why a link failed names its channel itself (a site's answer: a video's says
+    it is gone or private, 2.15): said alone."""
     return _site_reason(why) is not None
 
 
@@ -352,6 +384,8 @@ class NetworkStreams:
             page = site_page(entry.url)
             if page is not None:
                 groups.setdefault(stream_id(page_address(page)), []).append(entry)
+            elif site_media(entry.url) is not None:
+                groups.setdefault(stream_id(entry.url), []).append(entry)  # (2.15)
         for key, rows in groups.items():
             if len(rows) < 2:
                 continue
@@ -364,7 +398,8 @@ class NetworkStreams:
                 name = next(
                     (e.name for e in sorted(rows, key=lambda e: -e.opened) if e.name in given)
                 )
-            kept.name, kept.url, kept.kind = name, newest.url, LIVE
+            live = site_page(newest.url) is not None
+            kept.name, kept.url, kept.kind = name, newest.url, LIVE if live else FILM
             kept.opened, kept.failed = newest.opened, newest.failed
             for entry in rows:
                 if entry is not kept:
@@ -389,7 +424,7 @@ class NetworkStreams:
         kind = FILM if kind == FILM else LIVE
         id = stream_id(url)
         entry = self._entries.get(id)
-        if entry is None and site_page(url) is not None:
+        if entry is None and (site_page(url) is not None or site_media(url) is not None):
             # A site channel's row kept under an older build's id for another spelling.
             entry = next((e for e in self._entries.values() if stream_id(e.url) == id), None)
         if entry is None:

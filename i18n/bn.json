@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "এই টাইটেলের চালানোর মতো কোনো ফাইল নেই।",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "এই টাইটেল শুধু 4K-তে আছে। চালাতে সেটিংস → 4K ভার্সন বদলান (এটি “কখনো না”-তে সেট করা)।",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "এই ভার্সন এখান থেকে চলছে:\n{new}\n\nএখন থেকে সেই ফাইলটি ব্যবহার করুন, অথবা QiTV বন্ধ করে পুরোনোটির উপর কপি করুন:\n{old}",
+  "This video is gone from {site}": "এই ভিডিওটি আর {site}-এ নেই",
+  "This video is private or for subscribers only on {site}": "এই ভিডিওটি {site}-এ ব্যক্তিগত বা শুধু সাবস্ক্রাইবারদের জন্য",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "QiTV রিলের মাধ্যমে, যা এনক্রিপ্ট করা বার্তা পাঠায় কিন্তু পড়তে পারে না।",
   "Tile {number}": "টাইল {number}",
   "Tiles: 2, 4, 6 or 9": "টাইল: 2, 4, 6 বা 9",

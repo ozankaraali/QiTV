@@ -1271,6 +1271,8 @@
   "This title has no file to play.": "لا يوجد ملف لتشغيل هذا العنوان.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "هذا العنوان متوفر بدقة 4K فقط. لتشغيله، غيّر الإعدادات ← نسخ 4K (مضبوطة على «أبدًا»).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "يعمل هذا الإصدار من:\n{new}\n\nاستخدم ذلك الملف من الآن فصاعدًا، أو أغلق QiTV وانسخه فوق القديم:\n{old}",
+  "This video is gone from {site}": "لم يعد هذا الفيديو موجودًا على {site}",
+  "This video is private or for subscribers only on {site}": "هذا الفيديو خاص أو للمشتركين فقط على {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "عبر مرحِّل QiTV الذي يمرّر رسائل مشفّرة لا يستطيع قراءتها.",
   "Tile {number}": "المربع {number}",
   "Tiles: 2, 4, 6 or 9": "المربعات: 2 أو 4 أو 6 أو 9",

@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "此影片没有可播放的文件。",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "此影片只有 4K 版本。如需播放，请更改“设置 → 4K 版本”（当前设为“从不”）。",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "此版本运行于：\n{new}\n\n今后请使用该文件，或关闭 QiTV 并用它覆盖旧文件：\n{old}",
+  "This video is gone from {site}": "此视频已不在 {site} 上",
+  "This video is private or for subscribers only on {site}": "此视频在 {site} 上为私享或仅限订阅者观看",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "经由 QiTV 中继，它只转发无法读取的加密消息。",
   "Tile {number}": "画面 {number}",
   "Tiles: 2, 4, 6 or 9": "画面数：2、4、6 或 9",

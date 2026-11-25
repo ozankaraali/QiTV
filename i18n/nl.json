@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Deze titel heeft geen bestand om af te spelen.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Deze titel is alleen in 4K. Wijzig Instellingen → 4K-versies om hem af te spelen (staat op Nooit).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Deze versie draait vanaf:\n{new}\n\nGebruik voortaan dat bestand, of sluit QiTV en kopieer het over het oude:\n{old}",
+  "This video is gone from {site}": "Deze video staat niet meer op {site}",
+  "This video is private or for subscribers only on {site}": "Deze video is privé of alleen voor abonnees op {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Via het QiTV-relay, dat versleutelde berichten doorgeeft die het niet kan lezen.",
   "Tile {number}": "Tegel {number}",
   "Tiles: 2, 4, 6 or 9": "Tegels: 2, 4, 6 of 9",

@@ -41,8 +41,8 @@ from PySide6.QtCore import QObject
 
 from services import i18n
 from services.i18n import N_, tr_n, translate
-from services.link_kind import PROBE, SITE, Provider, address, classify
-from services.live_sites import page_address, site_page
+from services.link_kind import PROBE, SITE, SITE_FILM, Provider, address, classify
+from services.live_sites import media_address, page_address, site_media, site_page
 from services.navigation import LinkRow
 from services.network_streams import FILM, LIVE, Entry, default_name, stream_id
 from services.provider_ids import NETWORK_TITLE
@@ -284,8 +284,11 @@ class LinkRows(QObject):
         url = address(text)
         kind = classify(url)
         page = site_page(url) if kind == SITE else None
+        media = site_media(url) if kind == SITE_FILM else None
         if page is not None:
             url, kind = page_address(page), LIVE  # a site's channel page: kept as its page
+        elif media is not None:
+            url, kind = media_address(media), FILM  # 2.15: a site's video or clip, a film
         if not url or url == entry.url:
             return
         if isinstance(kind, Provider):

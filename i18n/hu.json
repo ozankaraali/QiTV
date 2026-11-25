@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Ehhez a címhez nincs lejátszható fájl.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Ez a cím csak 4K-ban érhető el. A lejátszáshoz módosítsd: Beállítások → 4K változatok (most: Soha).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Ez a verzió innen fut:\n{new}\n\nMostantól ezt a fájlt használd, vagy zárd be a QiTV-t, és másold rá a régire:\n{old}",
+  "This video is gone from {site}": "Ez a videó már nincs fent a(z) {site} oldalon",
+  "This video is private or for subscribers only on {site}": "Ez a videó a(z) {site} oldalon privát, vagy csak előfizetőknek érhető el",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "A QiTV továbbítóján át, amely a nem olvasható, kódolt üzeneteket továbbítja.",
   "Tile {number}": "{number}. kép",
   "Tiles: 2, 4, 6 or 9": "Képek: 2, 4, 6 vagy 9",

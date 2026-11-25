@@ -86,6 +86,20 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify("https://cdn.example/watch"), PROBE)
         self.assertEqual(classify("https://cdn.example/stream.php?id=5"), PROBE)
 
+    def test_site_videos_and_clips_classify_as_site_films(self):
+        from services.link_kind import SITE_FILM
+
+        for url in (
+            "https://www.twitch.tv/videos/123456",
+            "clips.twitch.tv/SomeSlug",
+            "twitch.tv/examplechannel/clip/SomeSlug",
+            "kick.com/video/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "kick.com/examplechannel/clips/clip_01KA",
+            "https://kick.com/examplechannel?clip=clip_01KA",
+        ):
+            with self.subTest(url):
+                self.assertEqual(classify(url), SITE_FILM)
+
     def test_site_pages_classify_as_site(self):
         # A Kick or Twitch channel's page: the site is asked for its stream, nothing is read.
         for url in (

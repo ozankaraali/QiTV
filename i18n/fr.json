@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Ce titre n’a aucun fichier à lire.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Ce titre n’existe qu’en 4K. Pour le lire, changez Paramètres → Versions 4K (réglé sur Jamais).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Cette version s’exécute depuis :\n{new}\n\nUtilisez désormais ce fichier, ou fermez QiTV et copiez-le à la place de l’ancien :\n{old}",
+  "This video is gone from {site}": "Cette vidéo n'est plus sur {site}",
+  "This video is private or for subscribers only on {site}": "Cette vidéo est privée ou réservée aux abonnés sur {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Via le relais QiTV, qui transmet des messages chiffrés qu’il ne peut pas lire.",
   "Tile {number}": "Image {number}",
   "Tiles: 2, 4, 6 or 9": "Images : 2, 4, 6 ou 9",

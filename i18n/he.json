@@ -1241,6 +1241,8 @@
   "This title has no file to play.": "לכותר הזה אין קובץ לניגון.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "הכותר הזה קיים רק ב-4K. כדי לנגן אותו, יש לשנות את הגדרות ← גרסאות 4K (מוגדר כעת ל\"אף פעם\").",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "הגרסה הזו פועלת מ:\n{new}\n\nמעכשיו יש להשתמש בקובץ הזה, או לסגור את QiTV ולהעתיק אותו מעל הישן:\n{old}",
+  "This video is gone from {site}": "הסרטון הזה כבר לא נמצא ב-{site}",
+  "This video is private or for subscribers only on {site}": "הסרטון הזה פרטי או למנויים בלבד ב-{site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "דרך ממסר QiTV, שמעביר הודעות מוצפנות שהוא לא יכול לקרוא.",
   "Tile {number}": "משבצת {number}",
   "Tiles: 2, 4, 6 or 9": "משבצות: 2, 4, 6 או 9",

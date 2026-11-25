@@ -102,7 +102,7 @@ from services.jobs import JobRunner
 from services.live import parts as live_parts
 from services.live.live_session import LiveSession
 from services.live.tuning import channel_key
-from services.live_sites import site_page
+from services.live_sites import media_address, site_media, site_page
 from services.local_episodes import next_in_folder, parse_episode
 from services.media_reporter import MediaReporter
 from services.media_server import Quality
@@ -303,6 +303,8 @@ class TVController(QObject):
     # not, or went for good (and why: an English text, `network_streams.failure_reason`).
     linkPlayed = Signal(object, str, str)
     linkFailed = Signal(object, str, str, str)
+    # 2.15: a site's video or clip (its page's address) answered with its name ("title · Twitch").
+    linkNamed = Signal(str, str)
 
     def __init__(
         self,
@@ -591,7 +593,7 @@ class TVController(QObject):
             tidy=self._tidy_from_menu,  # 2.9.1: out of the lists, no PIN
             record_at=lambda: self.record_at,
             link=lambda item: self._network_url(item) is not None,
-            site_page_of=self._site_page,
+            site_page_of=self._site_link,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -1355,14 +1357,26 @@ class TVController(QObject):
         url = self._network_url(item)
         return url if url is not None and site_page(url) is not None else None
 
+    def _site_link(self, item: dict) -> Optional[str]:
+        """The page of the link `item` when it is a site's channel page or (2.15) a video's or
+        clip's page of one: what it is copied and remembered as (never the address its site
+        answers); None for any other item. (A channel's live behaviour keys on `_site_page`.)"""
+        url = self._network_url(item)
+        if url is None:
+            return None
+        return url if site_page(url) is not None or site_media(url) is not None else None
+
     def _resolve_site(
         self, url: str, ok: Callable[[str], None], failed: Callable[[str], None]
     ) -> None:
         """The lanes' resolver: the site of the channel page `url` asked for the stream it
-        plays now, on a worker; `ok(address)` or `failed(why)` comes on this thread (why in
-        English: Network streams keeps it, `site_failure`). The tune's ask is noted, so a
-        newer tune stops it (`_request`)."""
-        page = site_page(url)
+        plays now (2.15: of a video's or clip's page, for the address it plays at, its name
+        said by `linkNamed`), on a worker; `ok(address)` or `failed(why)` comes on this thread
+        (why in English: Network streams keeps it, `site_failure`). The tune's ask is noted,
+        so a newer tune stops it (`_request`)."""
+        channel = site_page(url)
+        media = site_media(url) if channel is None else None
+        page = channel or media
         if page is None or self._closed:
             failed("")  # (the lanes ask only for a site's page, and are closed with QiTV)
             return
@@ -1371,8 +1385,12 @@ class TVController(QObject):
         if self._asking_tune:
             self._tune_stop = stop
 
-        def answered(_context: object, address: object) -> None:
+        def answered(_context: object, answer: object) -> None:
             self._site_asked(stop)
+            address = getattr(answer, "url", answer)
+            name = getattr(answer, "name", "")
+            if media is not None and name and not self._closed:
+                self.linkNamed.emit(media_address(media), str(name))  # (2.15: its title)
             ok(str(address))
 
         def refused(_context: object, reason: object) -> None:
@@ -2824,7 +2842,7 @@ class TVController(QObject):
                 if self._grid is not None:
                     self._grid.link_failed(name, target.item)
         self._menu_error(self._own_words(message) or self._named(target.title, message))
-        page = self._site_page(target.item)
+        page = self._site_link(target.item)
         if page is not None and is_site_failure(message):
             # Its site gave no stream (for the PiP, a tile, an outside player, the phone):
             # counted in its row as a play's. (What failed using a link it gave is not: its
@@ -3179,7 +3197,7 @@ class TVController(QObject):
         # 2.14 review M5: a Plex conversion's session ends with its play: its file is kept.
         menu = None if target.live or target.local else self._media_menu(target.item)
         # A site's channel page is remembered as its page, not the address with its token.
-        link = str((menu or {}).get("file") or self._site_page(target.item) or url)
+        link = str((menu or {}).get("file") or self._site_link(target.item) or url)
         try:
             self.watch.record_play(
                 item_provider.provider_name(self.catalog, target.item),

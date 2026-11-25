@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Aquest títol no té cap fitxer per reproduir.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Aquest títol només és en 4K. Per reproduir-lo, canvia Configuració → Versions 4K (ara és a Mai).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Aquesta versió s'executa des de:\n{new}\n\nFes servir aquest fitxer d'ara endavant, o tanca QiTV i copia'l sobre l'anterior:\n{old}",
+  "This video is gone from {site}": "Aquest vídeo ja no és a {site}",
+  "This video is private or for subscribers only on {site}": "Aquest vídeo és privat o només per a subscriptors a {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Per mitjà del relleu de QiTV, que transmet missatges xifrats que no pot llegir.",
   "Tile {number}": "Quadre {number}",
   "Tiles: 2, 4, 6 or 9": "Quadres: 2, 4, 6 o 9",

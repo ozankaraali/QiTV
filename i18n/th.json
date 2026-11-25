@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "เรื่องนี้ไม่มีไฟล์ให้เล่น",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "เรื่องนี้มีแค่ 4K หากจะเล่น ให้เปลี่ยน การตั้งค่า → เวอร์ชัน 4K (ตั้งไว้เป็น “ไม่เลย”)",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "เวอร์ชันนี้ทำงานจาก:\n{new}\n\nใช้ไฟล์นั้นต่อจากนี้ หรือปิด QiTV แล้วคัดลอกทับไฟล์เก่า:\n{old}",
+  "This video is gone from {site}": "วิดีโอนี้ไม่มีบน {site} แล้ว",
+  "This video is private or for subscribers only on {site}": "วิดีโอนี้เป็นแบบส่วนตัวหรือสำหรับสมาชิกที่สมัครรับเท่านั้นบน {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "ผ่านรีเลย์ของ QiTV ซึ่งส่งต่อข้อความที่เข้ารหัสโดยอ่านไม่ได้",
   "Tile {number}": "จอ {number}",
   "Tiles: 2, 4, 6 or 9": "จำนวนจอ: 2, 4, 6 หรือ 9",

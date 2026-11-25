@@ -1568,6 +1568,109 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.assertEqual(len(self.asked), 2)
 
 
+TWITCH_VIDEO = "https://www.twitch.tv/videos/123456"
+KICK_CLIP = "https://kick.com/examplechannel/clips/clip_01KABC"
+VIDEO_URL = "https://cdn.example/abc_examplechannel_1/1080p60/index-dvr.m3u8"
+CLIP_URL = "https://clips.example/clip/1080/index.mp4?sig=sentinel-sig&token=sentinel-token"
+
+
+class SiteFilmTests(PlayerCase):
+    """2.15: a Kick or Twitch video's or clip's page plays as a film: asked afresh of its site
+    each play (services.live_sites.resolve_media, faked here), kept by its page, named by its
+    title, resumed where it stopped; one that is gone says so."""
+
+    def setUp(self):
+        super().setUp()
+        self.loaded()
+        self.asked = []
+        self.answers = []  # each ask's answer in turn: (address, title) or a SiteError
+        self.enterContext(mock.patch.object(live_sites, "resolve_media", self.resolve))
+        self.addCleanup(lambda: wait_until(lambda: self.controller._jobs.pending() == 0))
+
+    def resolve(self, media, stop=None, **_kwargs):
+        self.asked.append((media, threading.current_thread() is threading.main_thread()))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        url, title = answer
+        return Resolved(url, live_sites.media_name(media, title))
+
+    def errors(self):
+        return [text for text, kind in self.toast.messages() if kind == "error"]
+
+    def test_a_video_plays_as_a_film_asked_afresh_named_by_its_title_and_resumes(self):
+        self.answers = [(VIDEO_URL, "A long evening"), (VIDEO_URL, "A long evening")]
+        self.link("twitch.tv/videos/123456?t=1h", FILM)
+        url, options = self.session.plays[-1]
+        self.assertEqual(url, VIDEO_URL)  # the site's answer plays, as a film
+        self.assertIsNone(options["start_ms"])
+        self.assertEqual(self.asked, [(live_sites.SiteMedia("twitch", "video", "123456"), False)])
+        self.assertEqual(self.catalog.links, [])
+        self.plays_now()
+        key = stream_id(TWITCH_VIDEO)
+        entry = self.store.get(key)
+        self.assertEqual((entry.url, entry.kind), ("twitch.tv/videos/123456?t=1h", FILM))
+        self.assertEqual(entry.name, "A long evening · Twitch")
+        cid = f"{NETWORK_PROVIDER}:movie:{key}"
+        self.session.positionChanged.emit(125_000, 6_000_000)
+        self.assertEqual(self.watch.positions[-1], (cid, 125_000, 6_000_000))
+        self.watch.resume[cid] = 125_000
+        self.opens(lambda: self.player.play_kept(key))
+        url, options = self.session.plays[-1]
+        self.assertEqual((url, options["start_ms"]), (VIDEO_URL, 125_000))
+        self.assertEqual(len(self.asked), 2)  # asked again for this play
+        self.assertEqual(len(self.store.entries()), 1)
+
+    def test_the_title_names_a_row_once_and_never_the_viewers(self):
+        self.answers = [(CLIP_URL, "Wow"), (CLIP_URL, "Wow, renamed by the site")]
+        self.link(KICK_CLIP, FILM)
+        self.plays_now()
+        key = stream_id(KICK_CLIP)
+        self.assertEqual(self.store.get(key).name, "Wow · Kick")
+        self.assertEqual(key, stream_id("https://kick.com/examplechannel?clip=clip_01KABC"))
+        self.player.rename(key, "Mine")
+        self.opens(lambda: self.player.play_kept(key))
+        self.plays_now()
+        self.assertEqual(self.store.get(key).name, "Mine")
+
+    def test_the_tokenized_address_is_never_kept_logged_or_remembered(self):
+        self.answers = [(CLIP_URL, "Wow")]
+        with self.assertLogs(level="DEBUG") as logs:
+            self.link(KICK_CLIP, FILM)
+            self.plays_now()
+        self.assertEqual(self.session.plays[-1][0], CLIP_URL)
+        self.assertNotIn("sentinel", "\n".join(logs.output))
+        self.assertNotIn("sentinel", self.store.save_bytes().decode())
+        provider, item, kind, link, _group = self.watch.plays[-1]
+        self.assertEqual((provider, kind, link), (NETWORK_PROVIDER, "movie", KICK_CLIP))
+
+    def test_copy_link_copies_the_videos_page(self):
+        QGuiApplication.clipboard().setText("")
+        self.answers = [(VIDEO_URL, "x")]
+        self.link(TWITCH_VIDEO, FILM)
+        self.plays_now()
+        with tvc.shown_menus() as popup:
+            self.controller.video_context(QPoint(10, 10))
+        tvc.menus_of(popup)[0][0].entry("Copy stream link").trigger()
+        self.assertEqual(QGuiApplication.clipboard().text(), TWITCH_VIDEO)
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_video_that_is_gone_or_private_says_so_plainly(self):
+        for reason, text in (
+            ("unknown", "This video is gone from Twitch"),
+            ("private", "This video is private or for subscribers only on Twitch"),
+        ):
+            with self.subTest(reason):
+                before = len(self.errors())
+                self.answers = [SiteError(reason)]
+                plays = len(self.session.plays)
+                self.player.play(TWITCH_VIDEO, FILM)
+                self.assertTrue(wait_until(lambda: len(self.errors()) > before))
+                self.assertEqual(self.errors()[-1], text)  # said alone, in its own words
+                self.assertEqual(len(self.session.plays), plays)  # nothing played
+                self.assertEqual(self.store.get(stream_id(TWITCH_VIDEO)).failed, text)
+
+
 class NoProviderHoldTests(PlayerCase):
     """With no provider configured a link holds the TV as a file opened in QiTV does: the
     welcome card, and what waits for QiTV to be idle, wait until it stops, ends or fails.

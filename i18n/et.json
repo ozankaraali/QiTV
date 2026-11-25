@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Sellel pealkirjal pole esitatavat faili.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "See pealkiri on ainult 4K-s. Esitamiseks muutke Seaded → 4K-versioonid (praegu „Mitte kunagi“).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "See versioon töötab asukohast:\n{new}\n\nKasutage nüüdsest seda faili või sulgege QiTV ja kopeerige see vana peale:\n{old}",
+  "This video is gone from {site}": "Seda videot saidil {site} enam pole",
+  "This video is private or for subscribers only on {site}": "See video on saidil {site} privaatne või ainult tellijatele",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "QiTV relee kaudu, mis edastab krüptitud sõnumeid, mida see lugeda ei saa.",
   "Tile {number}": "Paan {number}",
   "Tiles: 2, 4, 6 or 9": "Paanid: 2, 4, 6 või 9",

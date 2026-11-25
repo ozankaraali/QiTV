@@ -10,6 +10,7 @@ says what it is (services.link_kind.classify):
   account (host)", which hands the account to Add provider;
 - a Kick or Twitch channel's page (with or without its scheme) is a live stream: Play hands
   over its page's own address, unread (its site is asked for the stream each time it plays);
+  a video's or clip's page of one (2.15) is a film, handed over alike (its own page's address);
 - a whole provider (an account's playlist or API link, a playlist's address, a portal): the
   line names its kind and host (never its login), the note says it is no one stream, and
   "Add as a provider…" hands it to Add provider, filled in, `add_provider(link)`;
@@ -51,6 +52,7 @@ from services.link_kind import (
     PROBE,
     PROBE_BYTES,
     SITE,
+    SITE_FILM,
     Kind,
     Provider,
     address,
@@ -58,7 +60,7 @@ from services.link_kind import (
     probe_text,
     xtream_account,
 )
-from services.live_sites import page_address, site_page
+from services.live_sites import media_address, page_address, site_media, site_page
 from services.provider_api import CLIENT_HEADERS
 from services.provider_link import M3U, STB, XTREAM, ProviderLink
 from services.redact import safe_exc
@@ -104,7 +106,7 @@ NOT_A_LINK_TEXT = N_("This isn't a link QiTV can open")
 LINK, PLAY, PROVIDER, ACCOUNT = "link", "play", "provider", "account"  # the card's keys
 NOTE = ("note", "")  # the note's place on the card
 _Rects = dict[tuple[str, str], QRectF]  # where things are on the card, by (zone, key)
-_FOUND = {LIVE: LIVE_FOUND, FILM: FILM_FOUND, SITE: LIVE_FOUND}
+_FOUND = {LIVE: LIVE_FOUND, FILM: FILM_FOUND, SITE: LIVE_FOUND, SITE_FILM: FILM_FOUND}
 _PROVIDER_FOUND = {XTREAM: XTREAM_FOUND, M3U: M3U_FOUND, STB: STB_FOUND}
 _NOTE_GAP_U = 0.8  # the mockup's, under the found line
 _NOTE_ALPHA = 0.55
@@ -374,8 +376,11 @@ class OpenLink(QObject):
                 self._hand_over(account)
         elif key == PLAY:
             page = site_page(url) if kind == SITE else None
+            media = site_media(url) if kind == SITE_FILM else None
             if page is not None:
                 self._start(page_address(page), LIVE)  # kept by its page, however written
+            elif media is not None:
+                self._start(media_address(media), FILM)  # 2.15: a video or clip, as a film
             elif kind in (LIVE, FILM):
                 self._start(url, str(kind))
             elif kind == PROBE and not self._may_probe(url):

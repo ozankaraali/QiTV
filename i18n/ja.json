@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "このタイトルには再生できるファイルがありません。",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "このタイトルは4K版のみです。再生するには設定 → 4K版を変更してください（現在は「再生しない」）。",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "このバージョンの実行場所:\n{new}\n\n今後はこのファイルを使うか、QiTVを終了して古いファイルに上書きコピーしてください:\n{old}",
+  "This video is gone from {site}": "この動画は{site}にもうありません",
+  "This video is private or for subscribers only on {site}": "この動画は{site}で非公開か、サブスクライバー限定です",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "QiTVのリレー経由です。リレーは読めない暗号化メッセージを中継します。",
   "Tile {number}": "タイル{number}",
   "Tiles: 2, 4, 6 or 9": "タイル数: 2、4、6、9",

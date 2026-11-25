@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Αυτός ο τίτλος δεν έχει αρχείο για αναπαραγωγή.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Αυτός ο τίτλος υπάρχει μόνο σε 4K. Για να παίξει, αλλάξτε το Ρυθμίσεις → Εκδόσεις 4K (είναι ρυθμισμένο σε Ποτέ).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Αυτή η έκδοση εκτελείται από:\n{new}\n\nΧρησιμοποιείτε αυτό το αρχείο από εδώ και πέρα ή κλείστε το QiTV και αντιγράψτε το πάνω στο παλιό:\n{old}",
+  "This video is gone from {site}": "Αυτό το βίντεο δεν υπάρχει πια στο {site}",
+  "This video is private or for subscribers only on {site}": "Αυτό το βίντεο είναι ιδιωτικό ή μόνο για συνδρομητές στο {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Μέσω του αναμεταδότη QiTV, που προωθεί κρυπτογραφημένα μηνύματα χωρίς να μπορεί να τα διαβάσει.",
   "Tile {number}": "Εικόνα {number}",
   "Tiles: 2, 4, 6 or 9": "Εικόνες: 2, 4, 6 ή 9",

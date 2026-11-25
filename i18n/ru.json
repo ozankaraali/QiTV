@@ -1251,6 +1251,8 @@
   "This title has no file to play.": "У этого видео нет файла для воспроизведения.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Это видео есть только в 4K. Чтобы его посмотреть, измените Настройки → 4K-версии (сейчас стоит «Никогда»).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Эта версия запущена из:\n{new}\n\nИспользуйте теперь этот файл или закройте QiTV и скопируйте его поверх старого:\n{old}",
+  "This video is gone from {site}": "Этого видео больше нет на {site}",
+  "This video is private or for subscribers only on {site}": "Это видео на {site} личное или только для подписчиков",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Через ретранслятор QiTV, который передаёт зашифрованные сообщения и не может их прочитать.",
   "Tile {number}": "Плитка {number}",
   "Tiles: 2, 4, 6 or 9": "Плитки: 2, 4, 6 или 9",

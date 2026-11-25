@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Овој наслов нема датотека за пуштање.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Овој наслов е само во 4K. За да го пуштите, променете Поставки → 4K верзии (поставено е на „Никогаш“).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Оваа верзија се извршува од:\n{new}\n\nКористете ја таа датотека отсега, или затворете го QiTV и копирајте ја врз старата:\n{old}",
+  "This video is gone from {site}": "Ова видео веќе го нема на {site}",
+  "This video is private or for subscribers only on {site}": "Ова видео на {site} е приватно или само за претплатници",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Преку релето на QiTV, кое пренесува шифрирани пораки што не може да ги прочита.",
   "Tile {number}": "Поле {number}",
   "Tiles: 2, 4, 6 or 9": "Полиња: 2, 4, 6 или 9",

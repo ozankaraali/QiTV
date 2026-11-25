@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "Tajuk ini tiada fail untuk dimainkan.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Tajuk ini hanya dalam 4K. Untuk memainkannya, tukar Tetapan → Versi 4K (kini ditetapkan kepada Tidak pernah).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Versi ini dijalankan dari:\n{new}\n\nGunakan fail itu mulai sekarang, atau tutup QiTV dan salinnya ke atas fail lama:\n{old}",
+  "This video is gone from {site}": "Video ini sudah tiada di {site}",
+  "This video is private or for subscribers only on {site}": "Video ini peribadi atau untuk pelanggan sahaja di {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Melalui geganti QiTV, yang menyampaikan mesej berkod yang tidak dapat dibacanya.",
   "Tile {number}": "Petak {number}",
   "Tiles: 2, 4, 6 or 9": "Petak: 2, 4, 6 atau 9",

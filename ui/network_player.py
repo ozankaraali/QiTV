@@ -26,7 +26,10 @@ controller plays it nowhere (`hides_link`: by its id, whoever's stream it is now
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
 went for good, is kept with why (`failed`, in plain words). Its kind changes only as this
 player handed it over: a kept film played another way (as a channel of ⟲ Recent or a tile)
-stays a film. Settings › Providers › Network streams changes them too (ui.settings_links):
+stays a film. A Kick or Twitch video or clip (2.15) is named by its title once its site
+answered with it (the controller's `linkNamed`): a row this player named ("title · Twitch",
+or its id's before that) takes it, one the viewer renamed keeps its name.
+Settings › Providers › Network streams changes them too (ui.settings_links):
 `rename`, `set_url` (a fresh token, or another stream that replaces the link's: its id stays,
 so its name and ⟲ Recent's row follow, and Open Link of that address finds it; its resume
 point stays for a fresh token only, through the controller's `forget_stopped`),
@@ -143,12 +146,19 @@ class NetworkPlayer(QObject):
         self._anchor = ""
         self._step_played = False  # the last step's link played (its failures after are not)
         self._passed: set[str] = set()
+        # 2.15: the names sites gave their videos and clips this run, by stream id, and the
+        # rows this player named so (renamed again by a newer answer, never the viewer's)
+        self._titles: dict[str, str] = {}
+        self._titled: set[str] = set()
         controller.set_links(self.url_of)
         controller.set_link_owner(self.whose)
         controller.set_link_player(self.play_kept)
         controller.set_link_stepper(self.step)
         controller.linkPlayed.connect(self._on_played)
         controller.linkFailed.connect(self._on_failed)
+        named = getattr(controller, "linkNamed", None)
+        if named is not None:
+            named.connect(self._on_named)
 
     # ---- the file ---------------------------------------------------------------------------
 
@@ -360,10 +370,34 @@ class NetworkPlayer(QObject):
             return False
         return (isinstance(key, str) and key in self._removed) or stream_id(url) in self._removed
 
+    def _on_named(self, url: str, name: str) -> None:
+        """A site's video or clip at `url` (its page) answered with its name (2.15): its row
+        takes it, unless the viewer named it (a row not kept yet takes it once it is)."""
+        if not isValid(self) or not name:
+            return
+        key = stream_id(url)
+        self._titles[key] = name
+        entry = self._of_stream(key)
+        if entry is not None and self._named(entry):
+            self._changed()
+
+    def _named(self, entry: Entry) -> bool:
+        """The row takes its site's name for it, when one came and it bears this player's name
+        (its address's, or an older title it gave): True when it changed."""
+        title = self._titles.get(stream_id(entry.url))
+        if title is None or entry.name == title:
+            return False
+        if entry.name != default_name(entry.url) and entry.id not in self._titled:
+            return False  # the viewer's name stays
+        self.store.rename(entry.id, title)
+        self._titled.add(entry.id)
+        return True
+
     def _on_played(self, item: object, kind: str, url: str) -> None:
         if not isValid(self) or not isinstance(item, dict) or self._dropped(item, url):
             return
         entry = self._kept(item, kind, url)
+        self._named(entry)
         self.store.opened(entry.id, self._now())
         if entry.id == self._stepped:
             self._step_played = True
@@ -374,6 +408,7 @@ class NetworkPlayer(QObject):
         if not isValid(self) or not isinstance(item, dict) or self._dropped(item, url):
             return
         entry = self._kept(item, kind, url)
+        self._named(entry)
         self.store.failed(entry.id, why)
         if entry.id == self._stepped and not self._step_played:
             self._passed.add(entry.id)  # it never played: the run's next steps pass it
@@ -386,6 +421,7 @@ class NetworkPlayer(QObject):
         """The link kept under `key` is listed as `name` from now on."""
         if self.store.get(key) is not None:
             self.store.rename(key, name)
+            self._titled.discard(key)  # (the viewer's name from now on)
             self._changed()
 
     def set_url(self, key: str, url: str, kind: str = "") -> None:

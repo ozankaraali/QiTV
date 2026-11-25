@@ -1241,6 +1241,8 @@
   "This title has no file to play.": "Šim nosaukumam nav atskaņojama faila.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Šis nosaukums ir tikai 4K. Lai to atskaņotu, mainiet Iestatījumi → 4K versijas (iestatīts „Nekad”).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Šī versija darbojas no:\n{new}\n\nTurpmāk izmantojiet šo failu vai aizveriet QiTV un nokopējiet to vecā vietā:\n{old}",
+  "This video is gone from {site}": "Šī video vietnē {site} vairs nav",
+  "This video is private or for subscribers only on {site}": "Šis video vietnē {site} ir privāts vai pieejams tikai abonentiem",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Caur QiTV releju, kas pārsūta šifrētus ziņojumus, kurus tas nevar nolasīt.",
   "Tile {number}": "Rūts {number}",
   "Tiles: 2, 4, 6 or 9": "Rūtis: 2, 4, 6 vai 9",

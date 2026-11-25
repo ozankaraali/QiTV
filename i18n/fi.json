@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Tällä nimikkeellä ei ole toistettavaa tiedostoa.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Tämä nimike on vain 4K-versiona. Toistaaksesi sen muuta asetusta Asetukset → 4K-versiot (se on Ei koskaan).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Tämä versio toimii sijainnista:\n{new}\n\nKäytä tästä lähtien tätä tiedostoa tai sulje QiTV ja kopioi se vanhan päälle:\n{old}",
+  "This video is gone from {site}": "Tätä videota ei enää ole sivustolla {site}",
+  "This video is private or for subscribers only on {site}": "Tämä video on sivustolla {site} yksityinen tai vain tilaajille",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "QiTV-releen kautta, joka välittää salattuja viestejä, joita se ei voi lukea.",
   "Tile {number}": "Ruutu {number}",
   "Tiles: 2, 4, 6 or 9": "Ruudut: 2, 4, 6 tai 9",

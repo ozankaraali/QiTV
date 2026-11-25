@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Maudhui haya hayana faili ya kucheza.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Maudhui haya yako katika 4K pekee. Ili kuyacheza, badilisha Mipangilio → Matoleo ya 4K (imewekwa Kamwe).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Toleo hili linaendeshwa kutoka:\n{new}\n\nTumia faili hiyo kuanzia sasa, au funga QiTV na uinakili juu ya ile ya zamani:\n{old}",
+  "This video is gone from {site}": "Video hii haipo tena kwenye {site}",
+  "This video is private or for subscribers only on {site}": "Video hii ni ya faragha au ya wanaojisajili pekee kwenye {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Kupitia relay ya QiTV, inayopitisha ujumbe uliosimbwa ambao haiwezi kuusoma.",
   "Tile {number}": "Kigae {number}",
   "Tiles: 2, 4, 6 or 9": "Vigae: 2, 4, 6 au 9",

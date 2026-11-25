@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Este título no tiene ningún archivo que reproducir.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Este título solo está en 4K. Para reproducirlo, cambia Ajustes → Versiones 4K (ahora está en Nunca).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Esta versión se ejecuta desde:\n{new}\n\nUsa ese archivo a partir de ahora, o cierra QiTV y cópialo sobre el anterior:\n{old}",
+  "This video is gone from {site}": "Este vídeo ya no está en {site}",
+  "This video is private or for subscribers only on {site}": "Este vídeo es privado o solo para suscriptores en {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "A través del relé de QiTV, que transmite mensajes cifrados que no puede leer.",
   "Tile {number}": "Recuadro {number}",
   "Tiles: 2, 4, 6 or 9": "Recuadros: 2, 4, 6 o 9",

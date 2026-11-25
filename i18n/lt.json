@@ -1241,6 +1241,8 @@
   "This title has no file to play.": "Šis kūrinys neturi failo, kurį būtų galima leisti.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Šis kūrinys yra tik 4K. Kad jį paleistumėte, pakeiskite Nustatymai → 4K versijos (nustatyta „Niekada“).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Ši versija paleista iš:\n{new}\n\nToliau naudokite tą failą arba uždarykite QiTV ir nukopijuokite jį vietoj senojo:\n{old}",
+  "This video is gone from {site}": "Šio vaizdo įrašo {site} nebėra",
+  "This video is private or for subscribers only on {site}": "Šis vaizdo įrašas {site} yra privatus arba skirtas tik prenumeratoriams",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Per QiTV retransliatorių, kuris perduoda užšifruotus pranešimus, kurių negali perskaityti.",
   "Tile {number}": "Langelis {number}",
   "Tiles: 2, 4, 6 or 9": "Langeliai: 2, 4, 6 arba 9",

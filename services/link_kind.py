@@ -10,10 +10,11 @@ live channel), so `classify` answers PROBE and the caller fetches the first 64 K
 
 A Kick or Twitch channel's page (services.live_sites.site_page: with or without its scheme,
 `www.` or `m.`) is a SITE: a live channel whose stream the site is asked for each time it plays,
-never read first.
+never read first. A video's or clip's page of one (2.15, `site_media`) is a SITE_FILM: a film
+whose address the site is asked for each time it plays.
 
-A kind is FILM, LIVE, PROBE, SITE, NONE (not a link QiTV opens), or a `Provider` holding what
-`parse_provider_link` read, for the "Add provider" offer. An Xtream stream path
+A kind is FILM, LIVE, PROBE, SITE, SITE_FILM, NONE (not a link QiTV opens), or a `Provider`
+holding what `parse_provider_link` read, for the "Add provider" offer. An Xtream stream path
 (/live/U/P/1.ts) is one stream, not a provider, though `xtream_account` can read the whole
 account out of it for an "Add the whole account" offer.
 """
@@ -25,7 +26,7 @@ import re
 from typing import Iterable, Optional, Union
 from urllib.parse import unquote, urlsplit
 
-from services.live_sites import site_page
+from services.live_sites import site_media, site_page
 from services.open_paths import (
     EXTRA_MUSIC_EXTENSIONS,
     EXTRA_VIDEO_EXTENSIONS,
@@ -43,6 +44,7 @@ from services.provider_link import (
 
 FILM, LIVE, PROBE, NONE = "FILM", "LIVE", "PROBE", "NONE"
 SITE = "SITE"  # a Kick or Twitch channel's page: live, its stream asked of the site as it plays
+SITE_FILM = "SITE_FILM"  # 2.15: a Kick or Twitch video's or clip's page: a film, asked alike
 # The audio internet radio is sent in, and the containers live channels come in: a file or a
 # stream that never ends, as its answer says (final review I2, the coordinator's ruling).
 _EITHER_EXTENSIONS = tuple(
@@ -136,6 +138,8 @@ def classify(url: str) -> Kind:
     """What `url` is, from its address alone."""
     if site_page(address(url)) is not None:
         return SITE  # (typed without its scheme too, as a channel's page is shared)
+    if site_media(address(url)) is not None:
+        return SITE_FILM
     parts = _split(url)
     if parts is None or not parts.netloc:
         return NONE

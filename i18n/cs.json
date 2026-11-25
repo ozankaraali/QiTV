@@ -1241,6 +1241,8 @@
   "This title has no file to play.": "Tento titul nemá soubor k přehrání.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Tento titul je jen ve 4K. Pro přehrání změňte Nastavení → Verze 4K (je nastaveno Nikdy).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Tato verze běží z:\n{new}\n\nOd teď používejte tento soubor, nebo zavřete QiTV a zkopírujte ho přes ten starý:\n{old}",
+  "This video is gone from {site}": "Toto video už na {site} není",
+  "This video is private or for subscribers only on {site}": "Toto video je na {site} soukromé nebo jen pro odběratele",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Přes relay QiTV, který předává zašifrované zprávy, jež nemůže číst.",
   "Tile {number}": "Dlaždice {number}",
   "Tiles: 2, 4, 6 or 9": "Dlaždice: 2, 4, 6 nebo 9",

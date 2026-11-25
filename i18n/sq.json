@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "Ky titull nuk ka skedar për të luajtur.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Ky titull është vetëm në 4K. Për ta luajtur, ndryshoni Cilësimet → Versionet 4K (është caktuar Kurrë).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Ky version niset nga:\n{new}\n\nPërdoreni atë skedar tani e tutje, ose mbyllni QiTV dhe kopjojeni mbi të vjetrin:\n{old}",
+  "This video is gone from {site}": "Kjo video nuk është më në {site}",
+  "This video is private or for subscribers only on {site}": "Kjo video është private ose vetëm për abonentët në {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Përmes releut të QiTV, që kalon mesazhe të koduara që nuk i lexon dot.",
   "Tile {number}": "Pamja {number}",
   "Tiles: 2, 4, 6 or 9": "Pamje: 2, 4, 6 ose 9",

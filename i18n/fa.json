@@ -1231,6 +1231,8 @@
   "This title has no file to play.": "این عنوان فایلی برای پخش ندارد.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "این عنوان فقط 4K دارد. برای پخش، تنظیمات → نسخه‌های 4K را تغییر دهید (روی «هرگز» است).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "این نسخه از اینجا اجرا می‌شود:\n{new}\n\nاز این پس همین فایل را به کار ببرید، یا QiTV را ببندید و آن را روی نسخهٔ قدیمی کپی کنید:\n{old}",
+  "This video is gone from {site}": "این ویدیو دیگر در {site} نیست",
+  "This video is private or for subscribers only on {site}": "این ویدیو در {site} خصوصی است یا فقط برای مشترکان",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "از طریق رله QiTV، که پیام‌های رمزگذاری‌شده را بدون توان خواندن رد می‌کند.",
   "Tile {number}": "کاشی {number}",
   "Tiles: 2, 4, 6 or 9": "کاشی‌ها: 2، 4، 6 یا 9",

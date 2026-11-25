@@ -12,11 +12,20 @@ import requests
 
 from services import live_sites
 from services.live_sites import (
+    CLIP,
     KICK,
     TWITCH,
+    VIDEO,
+    Recording,
     SiteError,
+    SiteMedia,
     SitePage,
+    media_address,
+    media_key,
     resolve,
+    resolve_media,
+    running_recording,
+    site_media,
     site_page,
 )
 from services.log_file import _Masked
@@ -359,6 +368,380 @@ class PrivacyTests(unittest.TestCase):
         with self.assertRaises(SiteError):
             resolve(SitePage(KICK, "examplechannel"), stop, kick_api=source.url + "/x")
         self.assertEqual(source.requests, [])
+
+
+UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+VOD_MASTER = (
+    "#EXTM3U\n"
+    '#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="1080p60",NAME="1080p60"\n'
+    '#EXT-X-STREAM-INF:BANDWIDTH=7500000,CODECS="avc1.4D402A,mp4a.40.2",RESOLUTION=1920x1080,'
+    'VIDEO="1080p60"\n'
+    "https://cdn.example.invalid/abc_examplechannel_1/1080p60/index-dvr.m3u8\n"
+    '#EXT-X-STREAM-INF:BANDWIDTH=9900000,CODECS="av01.0.08M.08,mp4a.40.2",RESOLUTION=1920x1080\n'
+    "https://cdn.example.invalid/abc_examplechannel_1/av1/index-dvr.m3u8\n"
+    '#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS="avc1.4D401F,mp4a.40.2",RESOLUTION=1280x720\n'
+    "https://cdn.example.invalid/abc_examplechannel_1/720p60/index-dvr.m3u8\n"
+).encode()
+RECORDING = (
+    "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:10\n#EXT-X-PLAYLIST-TYPE:EVENT\n"
+    '#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI="init-0.mp4"\n'
+    "#EXTINF:10.000,\n0.mp4\n#EXTINF:10.000,\n1.mp4\n"
+).encode()
+KICK_MASTER = (
+    "#EXTM3U\n"
+    '#EXT-X-STREAM-INF:BANDWIDTH=9000000,CODECS="avc1.64002A,mp4a.40.2",RESOLUTION=1920x1080\n'
+    "1080p60/playlist.m3u8\n"
+    '#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS="avc1.4D401F,mp4a.40.2",RESOLUTION=852x480\n'
+    "480p30/playlist.m3u8\n"
+).encode()
+KICK_RECORDING = (
+    "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:13\n#EXT-X-PLAYLIST-TYPE:EVENT\n"
+    "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PROGRAM-DATE-TIME:2026-11-25T09:58:35.031Z\n"
+    "#EXTINF:10.000,\n0.ts\n#EXT-X-PROGRAM-DATE-TIME:2026-11-25T09:58:45.031Z\n"
+    "#EXTINF:10.000,\n1.ts\n#EXT-X-ENDLIST\n"
+).encode()
+
+
+def gql_answers(answers):
+    """A GQL route answering each request by what its body asks: a persisted token ask by
+    `answers["token"]`, any other query by the first key of `answers` its text names."""
+
+    def route(handler, count):
+        body = json.loads(handler.body)
+        if body.get("operationName") == "PlaybackAccessToken":
+            data = answers["token"]
+        else:
+            query = body.get("query", "")
+            data = next(v for k, v in answers.items() if k != "token" and k in query)
+        return 200, JSON, json.dumps({"data": data}).encode()
+
+    return route
+
+
+class SiteMediaTests(unittest.TestCase):
+    def test_videos_and_clips_are_recognized_in_every_form(self):
+        slug = "BraveTinyOtterKappa-AbC_12"
+        for url, media in (
+            ("twitch.tv/videos/123456", SiteMedia(TWITCH, VIDEO, "123456")),
+            ("https://www.twitch.tv/videos/123456?t=1h2m3s", SiteMedia(TWITCH, VIDEO, "123456")),
+            ("https://m.twitch.tv/videos/123456", SiteMedia(TWITCH, VIDEO, "123456")),
+            (f"https://clips.twitch.tv/{slug}", SiteMedia(TWITCH, CLIP, slug)),
+            (f"twitch.tv/ExampleChannel/clip/{slug}?x=1", SiteMedia(TWITCH, CLIP, slug)),
+            (f"https://kick.com/examplechannel/videos/{UUID}", SiteMedia(KICK, VIDEO, UUID)),
+            (f"kick.com/video/{UUID}", SiteMedia(KICK, VIDEO, UUID)),
+            (
+                "kick.com/examplechannel/clips/clip_01KABCdef",
+                SiteMedia(KICK, CLIP, "clip_01KABCdef"),
+            ),
+            (
+                "https://kick.com/ExampleChannel?clip=clip_01KABCdef",
+                SiteMedia(KICK, CLIP, "clip_01KABCdef"),
+            ),
+        ):
+            with self.subTest(url):
+                self.assertEqual(site_media(url), media)
+                self.assertIsNone(site_page(url))  # never a channel's page
+
+    def test_a_clip_slug_keeps_its_letter_case(self):
+        self.assertEqual(site_media("clips.twitch.tv/AbC").ident, "AbC")
+        self.assertNotEqual(site_media("clips.twitch.tv/AbC"), site_media("clips.twitch.tv/abc"))
+
+    def test_other_pages_are_no_video(self):
+        for url in (
+            "twitch.tv/videos/abc",
+            "twitch.tv/examplechannel",
+            "twitch.tv/examplechannel/videos",
+            "clips.twitch.tv/embed",
+            "kick.com/examplechannel",
+            "kick.com/examplechannel?clip=nope",
+            "kick.com/examplechannel/videos/not-a-uuid",
+            "kick.com/video/123",
+            "kick.com/categories/clips/clip_1",
+            "https://user@kick.com/video/" + UUID,
+            "example.com/videos/123",
+            "",
+        ):
+            self.assertIsNone(site_media(url), url)
+
+    def test_one_video_is_one_key_however_its_page_was_written(self):
+        kick = [
+            site_media(f"kick.com/examplechannel/videos/{UUID}"),
+            site_media(f"kick.com/video/{UUID}"),
+        ]
+        self.assertEqual(media_key(kick[0]), media_key(kick[1]))
+        clip = [
+            site_media("kick.com/examplechannel/clips/clip_1"),
+            site_media("kick.com/examplechannel?clip=clip_1"),
+        ]
+        self.assertEqual(media_key(clip[0]), media_key(clip[1]))
+        self.assertEqual(media_address(clip[0]), "https://kick.com/examplechannel/clips/clip_1")
+        self.assertEqual(media_address(kick[0]), f"https://kick.com/video/{UUID}")
+        self.assertEqual(
+            media_address(site_media("twitch.tv/examplechannel/clip/Slug")),
+            "https://clips.twitch.tv/Slug",
+        )
+        self.assertEqual(
+            media_address(site_media("m.twitch.tv/videos/9?t=1")), "https://www.twitch.tv/videos/9"
+        )
+
+
+class TwitchMediaTests(unittest.TestCase):
+    def serve(self, answers, usher=None, variant=None):
+        routes = Routes(
+            {
+                "/gql": gql_answers(answers),
+                "/vod/123.m3u8": usher or (200, {}, VOD_MASTER),
+            }
+        )
+        source = LocalSource(routes)
+        self.addCleanup(source.close)
+        return source
+
+    def resolve(self, source, ident="123", kind=VIDEO, keep_dir=None):
+        return resolve_media(
+            SiteMedia(TWITCH, kind, ident),
+            twitch_gql=source.url + "/gql",
+            twitch_vod=source.url + "/vod",
+            keep_dir=keep_dir,
+        )
+
+    def reason(self, source, **kwargs):
+        with self.assertRaises(SiteError) as caught:
+            self.resolve(source, **kwargs)
+        return caught.exception.reason
+
+    def answers(self, status="RECORDED", grant=True):
+        token = {"videoPlaybackAccessToken": {"value": TOKEN, "signature": SIGNATURE}}
+        return {
+            "video(id": {"video": {"title": "  A long   evening  ", "status": status}},
+            "token": token if grant else {"videoPlaybackAccessToken": None},
+        }
+
+    def test_a_video_plays_its_source_variant_named_by_its_title(self):
+        source = self.serve(self.answers())
+        resolved = self.resolve(source)
+        # The H.264 source, not the AV1 one listed with a higher bandwidth (VLC's film codecs).
+        self.assertEqual(
+            resolved.url, "https://cdn.example.invalid/abc_examplechannel_1/1080p60/index-dvr.m3u8"
+        )
+        self.assertEqual(resolved.name, "A long evening · Twitch")
+        query = parse_qs(urlsplit(source.requests[-1][0]).query)
+        self.assertEqual(query["sig"], [SIGNATURE])
+        self.assertEqual(query["token"], [TOKEN])
+        token_ask = next(json.loads(b) for b in source.bodies if b"PlaybackAccessToken" in b)
+        self.assertEqual(token_ask["variables"]["vodID"], "123")
+        self.assertIs(token_ask["variables"]["isVod"], True)
+
+    def test_a_video_still_recorded_plays_as_far_as_it_is_listed(self):
+        folder = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        source = self.serve(self.answers(status="RECORDING"))
+        master = VOD_MASTER.replace(b"https://cdn.example.invalid", source.url.encode())
+        source.routes["/vod/123.m3u8"] = (200, {}, master)
+        source.routes["/abc_examplechannel_1/1080p60/index-dvr.m3u8"] = (200, {}, RECORDING)
+        resolved = self.resolve(source, keep_dir=folder)
+        self.assertTrue(resolved.url.startswith("file://"), resolved.url)
+        path = urlsplit(resolved.url).path
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("#EXT-X-ENDLIST", text)
+        self.assertIn(source.url + "/abc_examplechannel_1/1080p60/1.mp4", text)
+        self.assertIn(source.url + "/abc_examplechannel_1/1080p60/init-0.mp4", text)
+        for secret in (SIGNATURE, "token="):
+            self.assertNotIn(secret, text)
+
+    def test_a_video_nobody_has_is_gone(self):
+        null = {"video(id": {"video": None}, "token": {"videoPlaybackAccessToken": None}}
+        self.assertEqual(self.reason(self.serve(null)), "unknown")
+        self.assertEqual(self.reason(self.serve(self.answers(grant=False))), "unknown")
+
+    def test_a_subscribers_video_is_private(self):
+        self.assertEqual(self.reason(self.serve(self.answers(), usher=(403, {}, b""))), "private")
+
+    def test_a_clip_plays_its_best_file_with_its_access(self):
+        clip = {
+            "title": "The goal",
+            "playbackAccessToken": {"value": TOKEN, "signature": SIGNATURE},
+            "videoQualities": [
+                {
+                    "quality": "1080",
+                    "frameRate": 59.99,
+                    "sourceURL": "https://c.invalid/1080/index.mp4",
+                },
+                {"quality": "720", "frameRate": 60, "sourceURL": "https://c.invalid/720/index.mp4"},
+            ],
+        }
+        source = self.serve({"clip(slug": {"clip": clip}})
+        resolved = self.resolve(source, ident="Slug", kind=CLIP)
+        parts = urlsplit(resolved.url)
+        self.assertEqual(parts.netloc + parts.path, "c.invalid/1080/index.mp4")
+        self.assertEqual(parse_qs(parts.query), {"sig": [SIGNATURE], "token": [TOKEN]})
+        self.assertEqual(resolved.name, "The goal · Twitch")
+
+    def test_a_clip_nobody_has_is_gone(self):
+        source = self.serve({"clip(slug": {"clip": None}})
+        self.assertEqual(self.reason(source, ident="Slug", kind=CLIP), "unknown")
+
+
+class KickMediaTests(unittest.TestCase):
+    def serve(self, video=None, clip=None):
+        source = LocalSource(Routes({}))
+        self.addCleanup(source.close)
+        master = source.url + "/media/hls/master.m3u8"
+        source.routes.update(
+            {
+                f"/api/v1/video/{UUID}": video
+                or (
+                    200,
+                    JSON,
+                    json.dumps(
+                        {"source": master, "livestream": {"session_title": "Night"}}
+                    ).encode(),
+                ),
+                "/api/v2/clips/clip_1": clip
+                or (
+                    200,
+                    JSON,
+                    json.dumps(
+                        {"clip": {"title": "Wow", "privacy": "public", "clip_url": master}}
+                    ).encode(),
+                ),
+                "/media/hls/master.m3u8": (200, {}, KICK_MASTER),
+            }
+        )
+        return source
+
+    def resolve(self, source, kind=VIDEO):
+        ident = UUID if kind == VIDEO else "clip_1"
+        return resolve_media(
+            SiteMedia(KICK, kind, ident),
+            kick_video_api=source.url + "/api/v1/video",
+            kick_clip_api=source.url + "/api/v2/clips",
+        )
+
+    def reason(self, source, kind=VIDEO):
+        with self.assertRaises(SiteError) as caught:
+            self.resolve(source, kind)
+        return caught.exception.reason
+
+    def test_a_video_and_a_clip_play_their_source_variant(self):
+        source = self.serve()
+        video = self.resolve(source)
+        self.assertEqual(video.url, source.url + "/media/hls/1080p60/playlist.m3u8")
+        self.assertEqual(video.name, "Night · Kick")
+        clip = self.resolve(source, CLIP)
+        self.assertEqual(clip.url, source.url + "/media/hls/1080p60/playlist.m3u8")
+        self.assertEqual(clip.name, "Wow · Kick")
+
+    def test_a_video_that_went_is_gone_and_a_private_one_says_so(self):
+        for body, reason in (
+            ({"deleted_at": "2026-11-01", "source": "x"}, "unknown"),
+            ({"is_pruned": True, "source": "x"}, "unknown"),
+            ({"source": None}, "unknown"),
+            ({"is_private": True, "source": "x"}, "private"),
+        ):
+            with self.subTest(body=body):
+                source = self.serve(video=(200, JSON, json.dumps(body).encode()))
+                self.assertEqual(self.reason(source), reason)
+        self.assertEqual(self.reason(self.serve(video=(404, JSON, b"{}"))), "unknown")
+        clip = {"clip": {"privacy": "private", "clip_url": "x"}}
+        self.assertEqual(
+            self.reason(self.serve(clip=(200, JSON, json.dumps(clip).encode())), CLIP), "private"
+        )
+        self.assertEqual(self.reason(self.serve(clip=(404, JSON, b"{}")), CLIP), "unknown")
+
+
+class RecordingTests(unittest.TestCase):
+    def test_twitch_the_running_broadcasts_video(self):
+        archive = {"id": "123", "status": "RECORDING", "createdAt": "2026-11-25T16:06:52Z"}
+        answers = {
+            "user(login": {"user": {"stream": {"archiveVideo": archive}}},
+            "token": {"videoPlaybackAccessToken": {"value": TOKEN, "signature": SIGNATURE}},
+        }
+        source = LocalSource(
+            Routes({"/gql": gql_answers(answers), "/vod/123.m3u8": (200, {}, VOD_MASTER)})
+        )
+        self.addCleanup(source.close)
+        found = running_recording(
+            SitePage(TWITCH, "examplechannel"),
+            twitch_gql=source.url + "/gql",
+            twitch_vod=source.url + "/vod",
+        )
+        self.assertEqual(
+            found,
+            Recording(
+                "https://cdn.example.invalid/abc_examplechannel_1/1080p60/index-dvr.m3u8",
+                1795622812.0,
+                dated=False,
+                steps=False,
+            ),
+        )
+        none = {"user(login": {"user": {"stream": {"archiveVideo": None}}}}
+        source.routes["/gql"] = gql_answers(none)
+        self.assertIsNone(
+            running_recording(SitePage(TWITCH, "examplechannel"), twitch_gql=source.url + "/gql")
+        )
+
+    def test_kick_the_live_video_dated_by_its_first_piece(self):
+        source = LocalSource(Routes({}))
+        self.addCleanup(source.close)
+        master = source.url + "/media/hls/master.m3u8"
+        rows = [{"is_live": True, "source": master, "start_time": "2026-11-25 09:58:38"}]
+        source.routes.update(
+            {
+                "/api/v2/channels/examplechannel/videos": (200, JSON, json.dumps(rows).encode()),
+                "/media/hls/master.m3u8": (200, {}, KICK_MASTER),
+                "/media/hls/1080p60/playlist.m3u8": (200, {}, KICK_RECORDING),
+            }
+        )
+        found = running_recording(
+            SitePage(KICK, "examplechannel"), kick_api=source.url + "/api/v2/channels"
+        )
+        self.assertEqual(found.url, source.url + "/media/hls/1080p60/playlist.m3u8")
+        self.assertAlmostEqual(found.start, 1795600715.031, places=3)
+        self.assertTrue(found.dated and found.steps)
+        rows[0]["is_live"] = False  # the newest video is a past one: none runs
+        source.routes["/api/v2/channels/examplechannel/videos"] = (
+            200,
+            JSON,
+            json.dumps(rows).encode(),
+        )
+        self.assertIsNone(
+            running_recording(
+                SitePage(KICK, "examplechannel"), kick_api=source.url + "/api/v2/channels"
+            )
+        )
+
+
+class MediaPrivacyTests(unittest.TestCase):
+    def test_no_token_in_logs_for_videos_and_clips(self):
+        clip = {
+            "title": "x",
+            "playbackAccessToken": {"value": TOKEN, "signature": SIGNATURE},
+            "videoQualities": [
+                {"quality": "1080", "frameRate": 60, "sourceURL": "https://c.invalid/a.mp4"}
+            ],
+        }
+        answers = {
+            "video(id": {"video": {"title": "t", "status": "RECORDED"}},
+            "clip(slug": {"clip": clip},
+            "token": {"videoPlaybackAccessToken": {"value": TOKEN, "signature": SIGNATURE}},
+        }
+        source = LocalSource(
+            Routes({"/gql": gql_answers(answers), "/vod/123.m3u8": (200, {}, VOD_MASTER)})
+        )
+        self.addCleanup(source.close)
+        with self.assertLogs(level="DEBUG") as logs:
+            for kind, ident in ((VIDEO, "123"), (CLIP, "Slug")):
+                resolve_media(
+                    SiteMedia(TWITCH, kind, ident),
+                    twitch_gql=source.url + "/gql",
+                    twitch_vod=source.url + "/vod",
+                )
+        masked = _Masked(logging.BASIC_FORMAT.replace("%(levelname)s:%(name)s:", ""))
+        text = "\n".join(masked.format(record) for record in logs.records)
+        self.assertIn("Twitch: a clip plays", text)
+        for secret in (SIGNATURE, TOKEN, "token=", "m3u8", "examplechannel_1", "c.invalid"):
+            self.assertNotIn(secret, text)
 
 
 if __name__ == "__main__":

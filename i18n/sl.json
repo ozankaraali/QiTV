@@ -1251,6 +1251,8 @@
   "This title has no file to play.": "Ta naslov nima datoteke za predvajanje.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Ta naslov je samo v 4K. Za predvajanje spremenite Nastavitve → Različice 4K (nastavljeno je Nikoli).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Ta različica se izvaja iz:\n{new}\n\nOdslej uporabljajte to datoteko ali zaprite QiTV in jo kopirajte čez staro:\n{old}",
+  "This video is gone from {site}": "Tega videa ni več na {site}",
+  "This video is private or for subscribers only on {site}": "Ta video je na {site} zaseben ali samo za naročnike",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Prek releja QiTV, ki posreduje šifrirana sporočila, ki jih ne more prebrati.",
   "Tile {number}": "Ploščica {number}",
   "Tiles: 2, 4, 6 or 9": "Ploščice: 2, 4, 6 ali 9",

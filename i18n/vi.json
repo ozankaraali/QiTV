@@ -1221,6 +1221,8 @@
   "This title has no file to play.": "Phim này không có tệp để phát.",
   "This title is only in 4K. To play it, change Settings → 4K versions (it is set to Never).": "Phim này chỉ có bản 4K. Để phát, hãy đổi Cài đặt → Bản 4K (đang đặt “Không bao giờ”).",
   "This version runs from:\n{new}\n\nUse that file from now on, or close QiTV and copy it over the old one:\n{old}": "Phiên bản này chạy từ:\n{new}\n\nTừ nay hãy dùng tệp đó, hoặc đóng QiTV và chép đè lên tệp cũ:\n{old}",
+  "This video is gone from {site}": "Video này không còn trên {site}",
+  "This video is private or for subscribers only on {site}": "Video này ở chế độ riêng tư hoặc chỉ dành cho người đăng ký trên {site}",
   "Through the QiTV relay, which passes on scrambled messages it can't read.": "Qua relay của QiTV, chỉ chuyển tiếp các tin nhắn đã mã hóa mà nó không đọc được.",
   "Tile {number}": "Ô {number}",
   "Tiles: 2, 4, 6 or 9": "Số ô: 2, 4, 6 hoặc 9",

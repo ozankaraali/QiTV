@@ -20,10 +20,11 @@ one that comes too late itself; the lanes never supersede it.
 A link whose address is already known (plan 4: one of Network streams, `known(item)`) is no
 provider's to make: the lanes answer it themselves, a turn later as a catalog answers a
 playlist's channel, under a request id of their own (negative: never a catalog's), so a
-choice made meanwhile still queues behind it. A Kick or Twitch channel's page is the one such
-address that does not play as it is: its site is asked for the stream each time
-(`resolver(page, ok, failed)`, the shell's, on a worker), and its answer, or why there is none,
-comes under that id as a catalog's would: stale ones are dropped alike.
+choice made meanwhile still queues behind it. A Kick or Twitch channel's page is one such
+address that does not play as it is, and so is a video's or clip's page of one (2.15): its site
+is asked for the stream each time (`resolver(page, ok, failed)`, the shell's, on a worker), and
+its answer, or why there is none, comes under that id as a catalog's would: stale ones are
+dropped alike.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from typing import Any, Callable, Optional, cast
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 
 from services import live_sites
-from services.live_sites import SITE_NAMES, SitePage, site_page
+from services.live_sites import SITE_NAMES, SiteMedia, SitePage, site_media, site_page
 from services.navigation import episode_key
 from services.open_paths import is_video
 from services.redact import safe_traceback
@@ -102,22 +103,34 @@ class Target:
 
 class SiteJob(QObject):
     """A site's channel page asked for the stream it plays now, on the runner's thread
-    (services.live_sites.resolve): `finished` with the address (its token never logged),
-    else `error` with why (live_sites.SiteError's reason: "offline", "unknown", "refused" or
-    "network", or "timeout" for a "network" whose site never answered in time). `stop` set ends
-    it between its requests, as "network": nobody waits for it."""
+    (services.live_sites.resolve), or a video's or clip's for the address it plays at (2.15,
+    `resolve_media`; `keep_dir`: where a recording still made keeps its listing):
+    `finished` with the answer (a `live_sites.Resolved`: the address, its token never
+    logged, and the name), else `error` with why (live_sites.SiteError's reason: "offline",
+    "unknown", "private", "refused" or "network", or "timeout" for a "network" whose site never
+    answered in time). `stop` set ends it between its requests, as "network": nobody waits
+    for it."""
 
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, page: SitePage, stop: threading.Event) -> None:
+    def __init__(
+        self,
+        page: SitePage | SiteMedia,
+        stop: threading.Event,
+        keep_dir: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self.page = page
         self.stop = stop
+        self.keep_dir = keep_dir
 
     def run(self) -> None:
         try:
-            answer = live_sites.resolve(self.page, self.stop)
+            if isinstance(self.page, SiteMedia):
+                answer = live_sites.resolve_media(self.page, self.stop, keep_dir=self.keep_dir)
+            else:
+                answer = live_sites.resolve(self.page, self.stop)
         except live_sites.SiteError as e:
             self.error.emit("timeout" if e.reason == "network" and e.timed_out else e.reason)
             return
@@ -125,13 +138,13 @@ class SiteJob(QObject):
             logger.warning(
                 "Asking %s for %s failed (%s)",
                 SITE_NAMES.get(self.page.site, self.page.site),
-                self.page.channel,
+                getattr(self.page, "channel", "") or "a video",
                 type(e).__name__,
             )
             logger.debug("%s", safe_traceback(e))
             self.error.emit("network")
             return
-        self.finished.emit(answer.url)
+        self.finished.emit(answer)
 
 
 def _quality(target: Target) -> dict:
@@ -223,7 +236,7 @@ class LinkLanes(QObject):
                 ),
             )
         request_id = next(self._own_ids)
-        if site_page(url) is None:
+        if site_page(url) is None and site_media(url) is None:
             QTimer.singleShot(0, self, lambda: self._on_ready(request_id, url))
             return request_id
 
