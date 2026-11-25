@@ -1,3 +1,4 @@
+import math
 import random
 import unittest
 
@@ -1916,7 +1917,7 @@ class CloseTests(unittest.TestCase):
         first = next(i for i, rate in enumerate(rates) if rate != 1.0)
         self.assertLessEqual(first * TICK, 3.25)  # after 3 s, not 15
         self.assertEqual(changes(rates), 2)
-        self.assertAlmostEqual(lag, 0.5, delta=0.1)
+        self.assertAlmostEqual(lag, 0.5 + stay_live._CLOSE_LAND_S, delta=0.05)  # it lands
         # Outside the budget: a drift a minute on is nudged as ever, not tolerated.
         lag, rates = drive(stay, lag + 0.6, 30.0, clock=clock)
         self.assertEqual(max(rates), 1.03)
@@ -1940,7 +1941,7 @@ class CloseTests(unittest.TestCase):
         stay.hold_reopen = False
         lag, rates = drive(stay, 1.9, 30.0, clock=clock)
         self.assertEqual(rates[0], stay_live._CLOSE_UP)  # counted meanwhile: at once
-        self.assertAlmostEqual(lag, 1.0, delta=0.1)
+        self.assertAlmostEqual(lag, 1.0 + stay_live._CLOSE_LAND_S, delta=0.05)
         stay, clock = self.close(1.0), Clock()
         stay.landed(0.0)
         stay.trouble()
@@ -1948,12 +1949,48 @@ class CloseTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.03)
 
     def test_too_little_room_is_under_vlcs_caching(self):
+        # Under VLC's own 0.3 s whatever the band (at Low the band's 0.3 s short is 0.2 s):
+        # urgent, VLC is about to run dry. At 0.3 s and more, within the band, left so.
+        cases = ((0.5, 0.3, 1.0), (0.5, 0.25, 0.95), (0.5, 0.15, 0.95), (1.0, 0.29, 0.95))
+        for target, lag, rate in cases:
+            with self.subTest(target=target, lag=lag):
+                stay, clock = self.close(target), Clock()
+                end, rates = drive(stay, lag, 60.0, clock=clock)
+                self.assertEqual(min(rates), rate)
+                if rate < 1.0:
+                    self.assertAlmostEqual(end, target, delta=0.1)
+
+    def test_a_landing_lands_with_one_catch_up_and_no_slow_down_after(self):
+        # The owner's call (2026-11-25): 1.10x, in step in about half the time. A landing 1.5 s
+        # behind under Low, the estimate wandering 0.08 s either way with the pieces: one
+        # 1.10x, to just above the target, and no 0.95x for too little room after it.
         stay, clock = self.close(0.5), Clock()
-        _, rates = drive(stay, 0.3, 60.0, clock=clock)  # 0.2 s short: within the band
-        self.assertEqual(set(rates), {1.0})
-        lag, rates = drive(stay, 0.15, 30.0, clock=clock)
-        self.assertEqual(min(rates), 0.95)  # urgent: VLC is about to run dry
-        self.assertAlmostEqual(lag, 0.5, delta=0.1)
+        stay.landed(1.0)
+        wander = lambda t: 0.08 * math.sin(2 * math.pi * t / 4.2)  # noqa: E731
+        lag, rates = drive(stay, 1.5, 60.0, clock=clock, noise=wander)
+        self.assertEqual(calls(rates), [stay_live._CLOSE_UP, 1.0])
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        took = sum(1 for rate in rates if rate != 1.0) * TICK
+        self.assertLessEqual(first * TICK, 3.25)
+        self.assertLessEqual(took, 10.0)  # 0.9 s at 1.10x: about 9 s (1.05x took 18)
+        self.assertGreaterEqual(lag, 0.5)
+        self.assertLessEqual(lag, 0.5 + stay_live._CLOSE_LAND_S + 0.1)  # (its wander)
+
+    def test_a_second_excursion_in_the_landing_window_gets_no_second_catch_up(self):
+        # Once per landing (ruling R20): a lag beyond the band later in the landing's window
+        # takes the ordinary rules and budget (a gentle 1.03x 15 s on), not another 1.10x.
+        stay, clock = self.close(0.5), Clock()
+        stay.landed(1.0)
+        lag, rates = drive(stay, 1.5, 20.0, clock=clock)
+        self.assertEqual(calls(rates), [stay_live._CLOSE_UP, 1.0])
+        lag, rates = drive(stay, lag + 0.6, 30.0, clock=clock)  # 20 s into the 60 s window
+        self.assertEqual(max(rates), 1.03)
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertGreaterEqual(first * TICK, 14.75)
+        stay.user_go_live()  # a new landing (Go live, a jump) has its own
+        stay.landed(1.0)
+        _, rates = drive(stay, 1.5, 10.0, clock=clock)
+        self.assertIn(stay_live._CLOSE_UP, rates)
 
     def test_its_dead_band_is_the_narrow_one(self):
         # What a jump's landing, a target's rise and trouble's cushion are judged by too.

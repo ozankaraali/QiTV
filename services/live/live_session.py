@@ -533,6 +533,9 @@ _FLOOD_HISTORY_S = 60.0
 _JUNCTION_RECENT_S = 180.0
 _JUNCTION_STEP_S = 0.5
 _JUNCTION_CHANGE_S = 1.0  # an ask moves by this much at least (or to 0): no chatter
+# 2026-11-25 (ruling R21): a source that reads its prefetch pieces as they are made is held close
+# to live (`StayLive.close`, `LearnedTarget.close`) at a target in force up to this, no more.
+_CLOSE_MAX_S = 1.5
 
 
 def segment_floor_from(value: str) -> bool:
@@ -1377,7 +1380,7 @@ class LiveSession(QObject):
             return
         self._latency = name
         self._stay.set_latency(name)
-        self._stay.close = self._close_to_live()
+        self._hold_close()
         if name != AUTO:
             if self._learned is not None:
                 self._learn(learned_only=True)  # what it learned so far stays the channel's
@@ -1529,6 +1532,7 @@ class LiveSession(QObject):
             return
         raised = seconds > self._caption_floor
         self._caption_floor = seconds
+        self._hold_close()  # (ruling R21: the captions' floor is never held close)
         playing = self._phase is _Phase.PIPELINE and not self._paused
         if raised:
             self._caption_armed = True
@@ -3046,7 +3050,7 @@ class LiveSession(QObject):
             self._stay.burst = self._filter.burst
             self._stay.spare = self._spare()
             self._stay.steady = self._filter.kept <= 0  # no kept burst: the calm band
-            self._stay.close = self._close_to_live()  # a live site's pieces as made, Low or Auto
+            self._hold_close()  # a live site's pieces as made, Low or Auto, about a second
             self._stay.caption_floor = self._caption_floor
             self._stay.edge = self._filter.edge(self._clock())  # what a backlog pushes ahead
             self._stay.flooding = self._flooding(snapshot)
@@ -3534,7 +3538,7 @@ class LiveSession(QObject):
         """Whether the source reads its playlist's prefetch pieces as they are made (2026-11-25:
         `prefetching`, as an HLS source's states say; a state before one is known says
         nothing). While it does, Low's and Stable's targets are their own
-        (`PREFETCH_TARGETS`), Low and Auto are held close (`StayLive.close`), and under Auto
+        (`PREFETCH_TARGETS`), Low and Auto are held close (`_close_to_live`), and under Auto
         the learned target streams (`LearnedTarget.streams`: its floor a second, and the need
         an earlier tune of the channel remembered, one learned from whole pieces that held a
         live site's start ~6 s back, no longer standing in for this tune's own); the steered
@@ -3546,18 +3550,17 @@ class LiveSession(QObject):
         if prefetching == self._prefetching:
             return
         self._prefetching = prefetching
-        self._stay.close = self._close_to_live()
         learned = self._learned
-        if learned is None:
-            return
-        burst = self._filter.burst_for(_number(snapshot.get("burst_s")))
-        before, remembered = learned.target(burst), learned.arrivals.remembered
-        learned.streams(prefetching)
-        self._steered.shift(learned.target(burst) - before)
-        if prefetching and remembered is not None:
-            _LOG.info(
-                "The channel's pieces come as they are made: its remembered need is set aside."
-            )
+        if learned is not None:
+            burst = self._filter.burst_for(_number(snapshot.get("burst_s")))
+            before, remembered = learned.target(burst), learned.arrivals.remembered
+            learned.streams(prefetching)
+            self._steered.shift(learned.target(burst) - before)
+            if prefetching and remembered is not None:
+                _LOG.info(
+                    "The channel's pieces come as they are made: its remembered need is set aside."
+                )
+        self._hold_close()  # (at the target the floor now gives)
 
     def _spare(self) -> float:
         """Under Auto, a kept burst's target holds the burst's room and its own margin: a lag
@@ -4497,9 +4500,23 @@ class LiveSession(QObject):
         return start_target(self._latency, prefetching=self._prefetching)
 
     def _close_to_live(self) -> bool:
-        """A source that reads its prefetch pieces as they are made, under Low or Auto: held
-        within a second of live (`StayLive.close`)."""
-        return self._prefetching and self._latency in ("low", AUTO)
+        """A source that reads its prefetch pieces as they are made, under Low or Auto, at a
+        target in force of `_CLOSE_MAX_S` or less and no AI captions' floor: held within a
+        second of live (`StayLive.close`, `LearnedTarget.close`). Ruling R21: a target that
+        trouble raised (Auto's 1.0 s to 2.6 s) means the source struggles, when fewer nudges
+        are wanted, not more; and the captions hold the picture back on purpose. Then today's
+        bands, cushion allowance and near-misses apply at that target."""
+        if not self._prefetching or self._latency not in ("low", AUTO) or self._caption_floor > 0:
+            return False
+        return self._control_target() <= _CLOSE_MAX_S + 1e-9
+
+    def _hold_close(self) -> None:
+        """Say whether the source is held close to live (`_close_to_live`) to stay-live and
+        the learned target."""
+        close = self._close_to_live()
+        self._stay.close = close
+        if self._learned is not None:
+            self._learned.close = close
 
     def _aim(self, snapshot: Mapping[str, Any]) -> float:
         """Where a start lands (a tune, Go live, a jump): the target, and while AI captions

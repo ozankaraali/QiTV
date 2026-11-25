@@ -107,10 +107,13 @@ close (the caller's `close`), its dead band is `_CLOSE_BAND_S` either side (a se
 of half a second is a lag of 1.5 s left as it is), with no calm band; what a landing left above
 it (the start Go live picked: the newest keyframe, up to an interval back, and VLC's open, which
 its pick may underrate: a lag behind the band within `_START_S` of the landing, nothing troubled
-since) is taken off as soon as the urgent cases are, at `_CLOSE_UP`, outside the budget (a
-gentle nudge 15 s on would hold the first minute a second or two behind); and too little room
-is under `_CLOSE_ROOM_S`, about VLC's own caching (at Low every lag short of the target is
-under `_ROOM_S`). Under Normal and Stable it steers as any source.
+since) is taken off as soon as the urgent cases are, at `_CLOSE_UP` (1.10x, the owner's pick,
+2026-11-25: in step in half the time 1.05x took), once per landing and outside the budget (a
+gentle nudge 15 s on would hold the first minute a second or two behind), to `_CLOSE_LAND_S`
+above the target (it lands, never short of it); a later lag beyond the band takes the ordinary
+rules and budget. Too little room is under `_CLOSE_ROOM_S`, VLC's own caching, whatever the band
+(at Low every lag short of the target is under `_ROOM_S`, and short of the band only under
+0.2 s). Under Normal and Stable it steers as any source.
 
 Pure logic; the caller feeds the measured lag and applies the returned Decision.
 """
@@ -181,7 +184,8 @@ _BACKLOG_MAX_S = 30.0  # far behind the target (beyond it, and _REOPEN's, the re
 _GENTLE = (_GENTLE_UP, _GENTLE_DOWN, _BACKLOG_UP)  # the budget counts these when they ran
 # A source held close to live (2026-11-25, `StayLive.close`): its dead band either side ...
 _CLOSE_BAND_S = 0.3
-_CLOSE_UP = 1.05  # ... the rate that takes off what a landing left above it ...
+_CLOSE_UP = _FAST  # ... the rate that takes off what a landing left above it (once) ...
+_CLOSE_LAND_S = 0.1  # ... to this far above the target (the estimate wanders about as much) ...
 _CLOSE_ROOM_S = 0.3  # ... and too little room: under VLC's own caching (0.3 s), about
 # Junctions (2.8.5): a source that restarts often takes back what stay-live is behind.
 _JUNCTION_MIN_S = 1.0  # behind the target by more than this: asked of the next restart
@@ -599,8 +603,9 @@ class StayLive:
         self.steady = False
         self.caption_floor = 0.0
         # Set by the caller (2026-11-25): the source reads its pieces as they are made and is
-        # held within a second of live (a live site's prefetch pieces under Low or Auto): the
-        # narrow band (`_CLOSE_BAND_S`, no calm band), a landing's excess taken off at once
+        # held within a second of live (a live site's prefetch pieces under Low or Auto, at a
+        # target in force of about 1.5 s or less, no AI captions' floor): the narrow band
+        # (`_CLOSE_BAND_S`, no calm band), a landing's excess taken off at once, once
         # (`_CLOSE_UP`), too little room under `_CLOSE_ROOM_S`.
         self.close = False
         # Set by the caller: how far under the target the lag may be while VLC still has the
@@ -673,6 +678,7 @@ class StayLive:
         self._landed_at: Optional[float] = None
         self._in_band = 0.0  # seconds the lag was back in the band since (`_BACK_IN_S`)
         self._troubled = False  # VLC ran out of room since the last landing (`close`)
+        self._catch = False  # the landing's catch-up is still to come (`close`: once a landing)
 
     @property
     def nudge(self) -> float:
@@ -775,6 +781,7 @@ class StayLive:
         self._landed_at = None  # the target in force at the next update
         self._in_band = 0.0
         self._troubled = False
+        self._catch = True
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def source_stepped(self) -> None:
@@ -1175,7 +1182,9 @@ class StayLive:
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
         far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
         room = lag - self._centre(-1, urgent=True)  # short of room: built to the target
-        short = room < -self._least() and self._short(lag) and not self._accepting
+        # (Held close, too little room is under `_CLOSE_ROOM_S` whatever the band: at Low the
+        # band's 0.3 s short of the target is 0.2 s, under VLC's caching.)
+        short = (self.close or room < -self._least()) and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
         under = short or (ahead < -max(self.band(-1), self.calm(-1)) and not tolerated)
         side = 1 if far or behind > max(self.band(1), self.calm(1)) else -1 if under else 0
@@ -1197,11 +1206,12 @@ class StayLive:
         start = side < 0 and self._start > 0  # the start's shortfall: built once, gently
         # Held close: behind the band within a landing's window, nothing troubled since, is the
         # landing's (the newest keyframe, VLC's open): taken off at once (`_CLOSE_UP`), once
-        # the stream that opened plays (its lag is known then).
+        # the stream that opened plays (its lag is known then), once a landing.
         own = (
             self.close
             and side > 0
             and not far
+            and self._catch
             and self._landing > 0
             and not self._troubled
             and not self.hold_reopen
@@ -1243,8 +1253,11 @@ class StayLive:
                 reason="building the start's room",
             )
         elif own:
+            self._catch = False  # once per landing
             reason = "what the landing left above the target"
-            nudge = _Nudge(_CLOSE_UP, abs(error), self._centre(side), reason=reason, own=True)
+            size = max(0.0, abs(error) - _CLOSE_LAND_S)
+            centre = self._centre(side) + _CLOSE_LAND_S
+            nudge = _Nudge(_CLOSE_UP, size, centre, reason=reason, own=True)
         else:
             up = self._up_rate(abs(error))  # a landing's excess can take long at 1.03x
             peak = _FAST if far else _SLOW if short else up if side > 0 else _GENTLE_DOWN
@@ -1272,6 +1285,8 @@ class StayLive:
         if nudge.limit is not None and rate != 1.0:
             nudge.limit -= dt
         centre = self._centre(sign, urgent=nudge.peak in (_FAST, _SLOW))
+        if nudge.own:
+            centre += _CLOSE_LAND_S  # a landing's catch-up lands just above the target
         if centre != nudge.target:  # Auto moved it, or the burst: resized to match
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre
@@ -1315,8 +1330,9 @@ class StayLive:
         # to go on. An urgent one goes on to the target: it may have been sized on a lag that
         # was still settling, or the lag stepped (a backlog) or the target moved since, and
         # stopping it short would only start the next one. A start's build ends in time to
-        # ramp out within its limit.
-        urgent = nudge.peak in (_FAST, _SLOW)
+        # ramp out within its limit. A landing's catch-up held close (1.10x) is sized as a
+        # gentle one: it ends at its size or at its landing, whichever comes first.
+        urgent = nudge.peak in (_FAST, _SLOW) and not nudge.own
         # (A backlog's catch-up too goes on to the target: the source may send more meanwhile.)
         spent = not (urgent or nudge.backlog) and nudge.left <= self._ramp_out(rate, nudge.step)
         k_now = round(abs(rate - 1.0) / nudge.step)

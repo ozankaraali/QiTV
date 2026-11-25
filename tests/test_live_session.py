@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import pause
 
 from services import revive
-from services.live import learned_target, source as live_source, worker
+from services.live import learned_target, source as live_source, stay_live, worker
 from services.live.kept import KeptRing, Where
 from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
@@ -9613,16 +9613,18 @@ class PrefetchTargetTests(LiveSessionCase):
 
     def test_a_close_source_holds_its_target_through_its_piece_waits(self):
         # Under Low: lands 1.3 s over the target (the newest keyframe 1.3 s back), takes it
-        # off at 1.05x within seconds, then holds half a second through the 0.3 s waits
-        # between pieces: no stall (the 2 s bound), no trouble, no hold, no other nudge.
+        # off at 1.10x within seconds (once: the landing's), lands just above the target and
+        # holds there through the 0.3 s waits between pieces: no stall (the 2 s bound), no
+        # trouble, no hold, no slow-down for room (under 0.3 s), no other nudge.
         sid = self.start(latency="low", channel="ch")
         feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
         lags = self.lags(feed, 120.0)
-        self.assertEqual(max(self.playback.rates), 1.05)
+        self.assertEqual(max(self.playback.rates), stay_live._CLOSE_UP)
+        self.assertEqual(min(self.playback.rates), 1.0)
         self.assertEqual(changes(self.playback.rates), 2)  # one nudge, in and out
         tail = lags[-240:]
         self.assertLessEqual(sum(tail) / len(tail), 0.8)
-        self.assertGreaterEqual(min(tail), 0.25)
+        self.assertGreaterEqual(min(tail), 0.3)
         self.assertEqual(feed.starved_s, 0.0)
         self.assertEqual(self.playback.holds, [])
         self.assertFalse(any(state["stalled"] for state in self.timelines[-480:]))
@@ -9688,3 +9690,31 @@ class PrefetchTargetTests(LiveSessionCase):
         self.step(0.25)
         self.assertEqual(self.live._learned.floor, learned_target.PREFETCH_FLOOR_S)
         self.assertAlmostEqual(self.timelines[-1]["target"], 1.0)
+
+    def test_a_raised_target_or_the_captions_floor_ends_the_close_mode(self):
+        # Ruling R21: held close only at a target in force of about 1.5 s or less and no AI
+        # captions' floor. Trouble raising Auto's 1.0 s (a struggling source: fewer nudges,
+        # not more) and the captions' floor get today's band, cushion allowance and
+        # near-misses at that target; back at a second, the close ones.
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = site_feed(self, sid, edge=7.3).ready(backlog_after_start=False)
+        feed.run(30.0)
+        learned = self.live._learned
+        self.assertTrue(self.live._stay.close and learned.close)
+        self.assertEqual(self.live._stay.dead_band(), stay_live._CLOSE_BAND_S)
+        learned.starved()  # trouble: Auto's target rises 1.6 s (its step held 10 s)
+        feed.run(11.0)
+        self.assertGreater(self.timelines[-1]["target"], 2.5)
+        self.assertFalse(self.live._stay.close or learned.close)
+        self.assertEqual(self.live._stay.dead_band(), stay_live._BAND_S)
+        learned.prior = learned_target.StarvationPrior()  # the margin gone (it fades so) ...
+        self.live._steered = live_session.SteeredTarget()  # ... and the steered target with it
+        feed.run(1.0)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 1.0, delta=0.15)
+        self.assertTrue(self.live._stay.close and learned.close)
+        self.live.set_caption_floor(8.0)
+        feed.run(0.5)
+        self.assertFalse(self.live._stay.close or learned.close)
+        self.live.set_caption_floor(0.0)
+        feed.run(0.5)
+        self.assertTrue(self.live._stay.close and learned.close)

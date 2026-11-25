@@ -133,9 +133,10 @@ target above the second the owner asked for with nothing wrong. Streamed (`strea
 batch after a still edge is a gap; how far the edge fell below its mean before each batch, the
 waits between pieces included (a request each: Kick's dipped 0.3-0.46 s), is the need, with
 `PREFETCH_MARGIN_S` (`MARGIN_S` less the half second VLC takes to open: its caching and the
-tick, a flow being no open) on top. A near-miss is one under `PREFETCH_NEAR_S`, as near for
-that floor as `NEAR_S` is for Normal's (at a second's lag every wait of 0.2 s or more between
-pieces fell under `NEAR_S`, its margin growing with each).
+tick, a flow being no open) on top. While the caller holds it close to live (`close`: a target
+in force of about a second), a near-miss is one under `PREFETCH_NEAR_S`, as near for that floor
+as `NEAR_S` is for Normal's (at a second's lag every wait of 0.2 s or more between pieces fell
+under `NEAR_S`, its margin growing with each); at a target trouble raised, `NEAR_S` as ever.
 
 Pure logic: no clock of its own, no Qt, no I/O.
 """
@@ -868,7 +869,9 @@ class LearnedTarget:
         under its burst (None: the module's `SEGMENT_FLOOR` now; False: learned only)."""
         self.floor = floor
         self._floor = floor  # the floor it was made with (`streams`)
-        self._near = NEAR_S  # a near-miss is one under this (`streams`)
+        # Set by the caller: held close to live (a streamed source at a target in force of
+        # about a second): a near-miss is one under `PREFETCH_NEAR_S`, not `NEAR_S`.
+        self.close = False
         self.segment_floor = _floored(segment_floor)
         self._burst = 0.0  # the burst the source reports now (`reported`) ...
         self._burst_since: Optional[float] = None  # ... since when
@@ -903,16 +906,15 @@ class LearnedTarget:
 
     def streams(self, on: bool = True) -> None:
         """The source now reads its pieces as they are made (a live site's HLS prefetch
-        pieces), or no longer does (`on` False: the floor it was made with, and the need and
-        near-misses as for any source, again). While it does, its floor is `PREFETCH_FLOOR_S`,
-        its need is read as a stream's (`ArrivalModel.streaming`) and a near-miss is one under
-        `PREFETCH_NEAR_S` (see the module); and what an earlier tune remembered of the need
+        pieces), or no longer does (`on` False: the floor it was made with, and the need as for
+        any source, again). While it does, its floor is `PREFETCH_FLOOR_S` and its need is read
+        as a stream's (`ArrivalModel.streaming`; near-misses follow `close`, see the module);
+        and what an earlier tune remembered of the need
         (`Learned.need`), learned from whole pieces landing a target duration at a time or
         from their burst, no longer stands in for this tune's own before its batches are
         measured (set aside for the tune). The prior's margin stays."""
         arrivals = self.arrivals
         self.floor = PREFETCH_FLOOR_S if on else self._floor
-        self._near = PREFETCH_NEAR_S if on else NEAR_S
         if on != arrivals.streaming:
             arrivals.streaming = on
             arrivals.renew()
@@ -963,7 +965,8 @@ class LearnedTarget:
         tune saw `MIN_GAPS` batches: VLC is still filling its cushion then."""
         if self.arrivals.seen < MIN_GAPS:
             return
-        self.prior.near_miss(headroom, self.margin(burst), self.room(burst), self._near)
+        near = PREFETCH_NEAR_S if self.close else NEAR_S
+        self.prior.near_miss(headroom, self.margin(burst), self.room(burst), near)
 
     def absorbed(self, headroom: float, burst: float = 0.0) -> None:
         """Trouble came (a stall that ended, say) and VLC did not run dry; `headroom`: the

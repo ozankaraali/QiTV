@@ -1279,15 +1279,17 @@ class StreamingTests(unittest.TestCase):
         self.assertGreater(target.target(), 1.5)
 
     def test_a_near_miss_on_a_prefetch_source_is_a_closer_one(self):
-        for streams, headroom, counted in (
+        # While the caller holds it close (a target in force of about a second); at a target
+        # trouble raised it is not close, and `NEAR_S` counts as ever (ruling R21).
+        for close, headroom, counted in (
             (True, 0.3, False),
             (True, 0.1, True),
             (False, 0.3, True),
         ):
-            with self.subTest(streams=streams, headroom=headroom):
+            with self.subTest(close=close, headroom=headroom):
                 target = LearnedTarget()
-                if streams:
-                    target.streams()
+                target.streams()
+                target.close = close
                 Source(target.arrivals).run(regular(1.0, 1.0, 6.5), 6.5)
                 target.near_miss(headroom)
                 target.near_miss(headroom + 0.01)  # the same dip
