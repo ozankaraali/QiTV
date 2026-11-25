@@ -9826,7 +9826,9 @@ class PrefetchTargetTests(LiveSessionCase):
         self.assertTrue(self.live._stay.close and learned.close)
 
 
-def piece_feed(case, sid, *, made, open_s, piece=2.0, prefetching=True, said=True, stand=False):
+def piece_feed(
+    case, sid, *, made, open_s, piece=2.0, prefetching=True, said=True, stand=False, piece_s=None
+):
     """A live site's tune as Kick's pieces come (2 s each, each beginning with a keyframe:
     the feed's `gop`; the state says their length unless not `said`): what was made of the
     piece being made, `made` seconds, comes at once in half-second states 20 ms apart (the
@@ -9837,7 +9839,7 @@ def piece_feed(case, sid, *, made, open_s, piece=2.0, prefetching=True, said=Tru
     feed = Feed(case, sid, burst=0.0, edge=min(made, 0.25), gop=piece, hls=True, open_s=open_s)
     feed.plays_seen = len(case.playback.plays)  # an earlier tune's play is not this one's
     feed.prefetching = prefetching
-    feed.piece = piece if said else None
+    feed.piece = (piece if piece_s is None else piece_s) if said else None
     if stand:  # from where `made` leaves the piece, a quarter second at a time
         quarters = round(piece / 0.25)
         sizes, gaps = [0.5] + [0.25] * (quarters - 2), [0.25] * (quarters - 2) + [0.5]
@@ -10101,6 +10103,47 @@ class TimedStartTests(LiveSessionCase):
                     self.assertGreaterEqual(self.live._land_offset, -0.05)  # (not short)
                     self.assertAlmostEqual(self.live._picture_s(), 0.3 - Feed.DT, delta=0.05)
                     self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_tune_whose_pieces_do_not_each_begin_with_a_keyframe_takes_todays_start(self):
+        # A Twitch channel's 1 s pieces with keyframes 3 s apart: the piece length the helper
+        # says is no keyframe spacing. Its first keyframe came 1.5 s before the first byte,
+        # older than a piece, so the tune does not wait for a keyframe "due" a piece on: it
+        # takes today's start once what came at once landed, and lands no further back than
+        # it (batch 2: it waited out its second and landed a second further back).
+        landings = {}
+        for timed in (True, False):
+            with self.today(timed):
+                self.live = self.make()
+                feed = self.tune_at(AUTO, 1.5, 0.3, piece=3.0, piece_s=1.0)
+                landings[timed] = self.landing(feed, 0)
+        (lag, waited), (today, _) = landings[True], landings[False]
+        self.assertLessEqual(lag, today + 0.35)
+        self.assertLessEqual(waited, 0.75)
+
+    def test_go_live_times_its_start_at_a_raised_auto_target_too(self):
+        # Auto's target raised above close mode's 1.5 s (a channel whose arrivals need more,
+        # batch 2: a Twitch channel's 1.6 s), keyframes 3 s apart: Go live still opens the newest
+        # keyframe at its moment, near the target in force, where today's pick on 3 s keyframes
+        # landed up to a keyframe off it (that channel: 4.55 s at 1.6 s).
+        self.live = self.make()
+        feed = self.tune_at(AUTO, 1.0, 0.3, piece=3.0)
+        self.landing(feed, 0)
+        feed.run(20.0)
+        self.live._learned.starved()  # trouble: Auto's target rises (its step held 10 s)
+        feed.run(15.0)
+        target = self.timelines[-1]["target"]
+        self.assertGreater(target, live_session._CLOSE_MAX_S)
+        self.assertFalse(self.live._stay.close)
+        for phase in (0.5, 1.25, 2.0, 2.75):
+            self.run_to(feed, 3.0, phase)
+            plays = len(self.playback.plays)
+            self.live.go_live()
+            lag, waited = self.landing(feed, plays)
+            self.assertGreaterEqual(lag, target - 0.25, f"phase {phase}")
+            self.assertLessEqual(lag, target + 0.55, f"phase {phase}")
+            self.assertLessEqual(waited, live_session._AIM_WAIT_S + 0.5, f"phase {phase}")
+            feed.run(15.0)
+        self.assertEqual(feed.starved_s, 0.0)
 
     def test_a_pause_while_go_live_waits_holds_the_picture_where_it_was(self):
         # Go live waiting for its moment, then a pause: the paused picture stays where the

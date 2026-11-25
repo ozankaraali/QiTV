@@ -420,6 +420,7 @@ _AIM_OVER_S = 0.4
 _AIM_WAIT_S = 3.0
 _AIM_LATE_S = 1.0
 _AIM_QUIET_S = 0.6
+_PIECE_KEY_S = 0.1  # a tune's keyframe this much older than a piece at its first byte: none each
 _PICTURE_N = 5
 # VLC's clock reads in steps, each behind it by up to a step (libVLC 3.0.23 on Kick: 25 ms from
 # its start, then 283 ms 0.3 s later), and the session looks each tick: where its clock started
@@ -4892,11 +4893,19 @@ class LiveSession(QObject):
             lag, seq = safe[0]
         return seq, lag
 
+    def _times_start(self) -> bool:
+        """Its starts are timed (`_timed_start`): a live site's pieces as made, one keyframe
+        to a piece or a few, under Low or Auto, with no AI captions' floor; at any target in
+        force (batch 2: close mode ends past `_CLOSE_MAX_S`, and with it today's pick came
+        back, a keyframe off the target: 4.55 s on a Twitch channel whose arrivals made Auto
+        1.6 s, keyframes 3 s apart)."""
+        return self._prefetching and self._latency in ("low", AUTO) and self._caption_floor <= 0
+
     def _open_time(self) -> float:
         """How long VLC takes to play a start it opens, as the picks count it (the edge moves
-        on meanwhile): on a source held close to live its time to its picture (`_picture_s`),
-        else its open time as ever (`_open_s`, play() to Playing)."""
-        return self._picture_s() if self._close_to_live() else self._open_s
+        on meanwhile): where starts are timed (`_times_start`) its time to its picture
+        (`_picture_s`), else its open time as ever (`_open_s`, play() to Playing)."""
+        return self._picture_s() if self._times_start() else self._open_s
 
     def _picture_s(self) -> float:
         """VLC's time to its picture: from play() to its clock's start (`_measure_picture`:
@@ -4911,11 +4920,12 @@ class LiveSession(QObject):
         return median(self._pictures) if self._pictures else _CACHING_S
 
     def _aiming(self, *, build: bool = False) -> bool:
-        """A start is timed (`_timed_start`): the source is held close to live, it plays
+        """A start is timed (`_timed_start`): a live site's source under Low or Auto
+        (`_times_start`), it plays
         (a pause kept, or VLC paused when Go live was pressed, opens at once, as a
         recovery's or the RAM ring's fresh buffer does: `build`), and the timed start has
         neither given way nor waited `_AIM_WAIT_S` and `_AIM_LATE_S` (then today's pick)."""
-        if build or self._paused or self._aim_off or not self._close_to_live():
+        if build or self._paused or self._aim_off or not self._times_start():
             return False
         if self._phase is _Phase.PIPELINE and self._playback.state() is PlaybackState.PAUSED:
             return False
@@ -4963,28 +4973,28 @@ class LiveSession(QObject):
             # The source is silent, and no start is at its moment: nothing comes to time
             # (one in the band opens all the same, above: review round 1).
             self._note_quiet_room(snapshot)
-            return self._give_way()
+            return self._give_way("the source sends nothing")
         lag, seq = keys[0]  # the newest
         if lag < aim - _AIM_SHORT_S:
             return None  # it lands there as it ages (at most the aim less VLC's picture time)
         awaited = self._aim_next
         if awaited is not None:
             if seq != awaited[0] or now > awaited[1] + 1e-9:
-                return self._give_way()  # the next keyframe came beyond the band, or is late
+                return self._give_way("its keyframe came beyond the band, or is late")
             return None
         # The first look: the next keyframe comes once the newest is the keyframes' spacing
         # old, and lands at the aim's band then or a moment later (what comes at once with
         # it only brings that sooner).
-        spacing = keys[1][0] - keys[0][0] if len(keys) > 1 else _number(snapshot.get("piece_s"))
         age = lag - picture - self._land_offset
+        spacing = keys[1][0] - keys[0][0] if len(keys) > 1 else self._piece_spacing(snapshot, age)
         if spacing <= 0:
-            return self._give_way()  # when the next one comes is not known
+            return self._give_way("when the next keyframe comes is not known")
         # (one already due waits `_AIM_LATE_S` for it: a piece late, or seen late, as a live
         # site's piece of keyframes 3 s apart often was; hel, Kick: one 0.5 s overdue at a
         # press opened today's start 3 s back)
         due = max(0.0, spacing - age) + max(0.0, aim - _AIM_SHORT_S - picture)
         if due > _AIM_WAIT_S + 1e-9:
-            return self._give_way()
+            return self._give_way("the next keyframe comes too late")
         self._aim_next = (seq, now + max(0.0, spacing - age) + _AIM_LATE_S)
         return None
 
@@ -5002,15 +5012,29 @@ class LiveSession(QObject):
         # kept by the open it gives way to (`_open_at`), for that start's batch only
         self._aim_quiet = (self._clock(), self._live_edge(snapshot) - self._advance())
 
+    def _piece_spacing(self, snapshot: Mapping[str, Any], age: float) -> float:
+        """The keyframes' spacing before a second one came: the piece length the helper says
+        (`piece_s`), when the keyframe began within the tune's first piece (its age at the
+        first byte no more than a piece, `_PIECE_KEY_S` to spare), as each of Kick's and
+        Twitch's 2 s pieces begins with one; else 0.0, not known (batch 2: a Twitch channel's
+        1 s pieces with keyframes 3 s apart: the tune waited a second for a keyframe "due" a
+        piece on, then took today's start a second further back)."""
+        piece = _number(snapshot.get("piece_s"))
+        first = next((at for at, edge in self._edges if edge > 0), None)
+        if piece <= 0 or self._phase is not _Phase.WAITING or first is None:
+            return piece
+        return piece if age - (self._clock() - first) <= piece + _PIECE_KEY_S else 0.0
+
     def _end_aim(self) -> None:
         """A timed start's wait ends with what it belongs to (an open, a pause of a waiting Go
         live, a recovery's or a resume's retry: review M3)."""
         self._aim_since = self._aim_next = None
         self._aim_live = self._aim_off = False
 
-    def _give_way(self) -> Optional[tuple[int, float]]:
+    def _give_way(self, why: str) -> Optional[tuple[int, float]]:
         """A timed start gives way (`_timed_start`): today's pick opens at once instead (the
         caller's `_live_start`); None, the timed start's answer then."""
+        _LOG.debug("The timed start gives way to today's (%s).", why)
         self._aim_off = True
         return None
 
@@ -5182,7 +5206,7 @@ class LiveSession(QObject):
         # VLC's time to its picture, measured where a start is timed with it (a source held
         # close to live; a paused open plays when the viewer says)
         self._end_picture()  # the last open's look ends with what it found
-        self._picture_due = self._opened_at if self._close_to_live() and not self._paused else None
+        self._picture_due = self._opened_at if self._times_start() and not self._paused else None
         self._end_aim()  # a timed start that waited opened, or something else did
         self._quiet_room, self._aim_quiet = self._aim_quiet, None  # (a silence it gave way to)
         self._vlc.restart(self._last_open)  # VLC's clock starts at the segment's start
