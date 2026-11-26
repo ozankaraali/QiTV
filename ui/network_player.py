@@ -16,12 +16,14 @@ each time it plays, from any path (⟲ Recent, a tile, the picture in picture, t
 Watch), and so does ⟲ Recent as it lists it: never the stamp it was kept with (an account
 configured after its link played owns it from then on). A kept link chosen in the channel list's
 Network streams, or found by its find, plays by its id (`play_kept`): its address and kind as
-kept. Channel up/down while a kept link plays steps to the next or previous kept link (`step`),
-in Network streams' order as the steps began, round from the last to the first. `rows()` are
-those links as the list's rows (a film's with where it stopped), and `find_items()` as the
-find's channels, plain dicts without their addresses. A link hidden with "Hide (parental
-controls)" is hidden as a channel is while locked: its row goes, the steps pass it, and the
-controller plays it nowhere (`hides_link`: by its id, whoever's stream it is now).
+kept. `item_of(id)` is that item and kind without playing it: what its row's menu (and the
+find's) and a tile it is dragged onto play. Channel up/down while a kept link plays steps to
+the next or previous kept link (`step`), in Network streams' order as the steps began, round
+from the last to the first. `rows()` are those links as the list's rows (a film's with where
+it stopped), and `find_items()` as the find's channels, plain dicts without their addresses.
+A link hidden with "Hide (parental controls)" is hidden as a channel is while locked: its row
+goes, the steps pass it, `item_of` has none, and the controller plays it nowhere
+(`hides_link`: by its id, whoever's stream it is now).
 
 A link that showed its first picture is kept (`keep`, `opened`); one that did not play, or
 went for good, is kept with why (`failed`, in plain words). Its kind changes only as this
@@ -153,6 +155,7 @@ class NetworkPlayer(QObject):
         controller.set_links(self.url_of)
         controller.set_link_owner(self.whose)
         controller.set_link_player(self.play_kept)
+        controller.set_link_item(self.item_of)
         controller.set_link_stepper(self.step)
         controller.linkPlayed.connect(self._on_played)
         controller.linkFailed.connect(self._on_failed)
@@ -296,12 +299,26 @@ class NetworkPlayer(QObject):
         """The controller plays the link `url` as `key`'s: as a channel or a film, the stream
         of the account whose host and user name it has (else Network streams'); `zapped`, as
         a zap step's."""
-        owner = self._owner(url) or NETWORK_PROVIDER
-        item = {"id": key, "name": name, "cmd": url, "_provider": owner}
+        item = self._item(key, name, url)
         self._handed[key] = kind
-        whose = "its account's" if owner != NETWORK_PROVIDER else "no provider's"
+        whose = "its account's" if item["_provider"] != NETWORK_PROVIDER else "no provider's"
         logger.info("Open Link: a %s link plays (%s stream)", kind.lower(), whose)
         self._controller.play_link(item, "movies" if kind == FILM else "live", zapped=zapped)
+
+    def _item(self, key: str, name: str, url: str) -> dict:
+        """The item the link `url` plays as, `key`'s: the stream of the account whose host and
+        user name it has, else Network streams'."""
+        owner = self._owner(url) or NETWORK_PROVIDER
+        return {"id": key, "name": name, "cmd": url, "_provider": owner}
+
+    def item_of(self, key: str) -> Optional[tuple[dict, str]]:
+        """The link kept under `key` as `play_kept` hands it over, without playing it: its item
+        (its kept address, whose stream it is now) and its kind, LIVE or FILM. None when none
+        is kept under it, or parental controls hide it now."""
+        entry = self.store.get(key)
+        if entry is None or self._hidden(entry):
+            return None
+        return self._item(entry.id, entry.name, entry.url), entry.kind
 
     def _hidden(self, entry: Entry) -> bool:
         """Whether parental controls hide the kept link now (locked; the controller's)."""

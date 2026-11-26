@@ -5,7 +5,9 @@ The player controls' "Open in external player" offers the two players for what p
 on a Library title or episode offers the players and its link (`show_target`). 2.9.3: a
 right-click on a channel of the guide offers its row's menu as the channel list has it
 (`show_channel`), and one on the picture the menu of what plays (`show_playing`: the channel's,
-without picture-in-picture of itself; a film's or an episode's players and link).
+without picture-in-picture of itself; a film's or an episode's players and link). A link of
+Network streams (its row, or the find's) offers the kept link's menu as it plays (`show_link`):
+a live one's as ⟲ Recent's, a film's without picture-in-picture.
 
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
@@ -44,6 +46,7 @@ from services.navigation import (
     item_key,
     item_title,
 )
+from services.network_streams import FILM
 from ui.link_lanes import LinkLanes, Target
 from ui.overlays import popup_menu
 from ui.overlays.popup_menu import ABOVE, Menu, Where
@@ -191,6 +194,24 @@ class ContextActions(QObject):
             else:
                 self._add_link_actions(menu, target)
         popup_menu.popup(menu, parent, at=global_pos, follow=False)
+
+    def show_link(
+        self, item: dict, kind: str, global_pos: Where, parent: Optional[QObject] = None
+    ) -> None:
+        """A kept link of Network streams' menu (its row in the channel list, or the find's)."""
+        popup_menu.popup(self.link_menu(item, kind), parent, at=global_pos)
+
+    def link_menu(self, item: dict, kind: str) -> Menu:
+        """The kept link `item`'s menu, `item` as it plays (its address, whose stream it is)
+        and `kind` LIVE or FILM: a live link's as its ⟲ Recent row's (picture-in-picture, Hide,
+        the players and its link); a film's without picture-in-picture (it never plays live)."""
+        film = kind == FILM
+        node = NavNode("item", item_key(item), item_title(item), item)
+        menu = Menu()
+        self._add_channel_actions(menu, node, pip=not film, recent=False)
+        menu.add_separator()
+        self._add_link_actions(menu, Target(item, "movies" if film else "live", node.title))
+        return menu
 
     def channel_menu(
         self, item: dict, group_key: str = "", *, playing: Optional[Target] = None

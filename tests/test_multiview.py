@@ -26,7 +26,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, pause, wait_until
 
-from services import free_radio, live_sites
+from services import free_radio, live_sites, network_streams
 from services.connection_budget import ConnectionBudget
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.navigation import NavNode, item_key
@@ -1840,6 +1840,20 @@ class LinkOwnerGridTests(MultiviewCase):
         kept = {"id": stream_id(self.URL), "name": "Seven", "cmd": self.URL}
         kept["_provider"] = NETWORK_PROVIDER  # as ⟲ Recent kept it, before the account
         self.controller.play_in_tile("t3", kept)
+        slot = self.sessions.slot("t3")
+        self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == self.URL))
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["t3"])
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+
+    def test_a_network_streams_row_dropped_on_a_tile_plays_there_as_its_accounts(self):
+        # Its row (the find's too) drags out as the kept link plays (the channel list's
+        # drag: test_network_drawer): dropped on a tile, it plays there under its account.
+        self.start_large(0)
+        self.v()
+        entry = self.player.store.keep(self.URL, "Seven", network_streams.LIVE)
+        item, _kind = self.player.item_of(entry.id)
+        point = self.page.mapToGlobal(self.grid_frame.rect_of("t3").center())
+        self.controller._on_channel_dropped(NavNode("item", entry.id, "Seven", item), point)
         slot = self.sessions.slot("t3")
         self.assertTrue(wait_until(lambda: slot.live.running and slot.live.url == self.URL))
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["t3"])

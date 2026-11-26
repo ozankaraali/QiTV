@@ -414,6 +414,8 @@ class TVController(QObject):
         self._whose: Callable[[dict], Optional[str]] = lambda item: None
         # Its link kept under an id plays, by the network player (`set_link_player`).
         self._play_kept: Callable[[str], bool] = lambda key: False
+        # A kept link as it plays, by its id, without playing it (`set_link_item`).
+        self._link_item: Callable[[str], Optional[tuple[dict, str]]] = lambda key: None
         # Channel up/down while a kept link plays: its neighbour there (`set_link_stepper`).
         self._step_link: Callable[[dict, int], bool] = lambda item, delta: False
         # A link plays while no provider is configured: held as a file opened in QiTV is (the
@@ -927,6 +929,9 @@ class TVController(QObject):
         drawer.playRequested.connect(self.play_item)
         drawer.channelFound.connect(self.play_found)
         drawer.contextRequested.connect(self._on_context)
+        set_link_item = getattr(drawer, "set_link_item", None)
+        if set_link_item is not None:  # its link rows' menus and drags, as the links play
+            set_link_item(lambda key: self._link_item(key))
         self._guide.tuneRequested.connect(self._on_guide_tune)
         self._guide.catchupRequested.connect(self._on_guide_catchup)
         self.overlays.guide.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
@@ -1313,6 +1318,12 @@ class TVController(QObject):
         """`play(id)`: the link of Network streams kept under `id` plays (the network
         player's: it knows its kind and whose stream it is); False when none is kept so."""
         self._play_kept = play
+
+    def set_link_item(self, item_of: Callable[[str], Optional[tuple[dict, str]]]) -> None:
+        """`item_of(id)`: the link of Network streams kept under `id` as `play` would hand it
+        over (its item: its address, whose stream it is; its kind, LIVE or FILM), None when
+        none is kept so: what its row's menu and a tile it is dragged onto play."""
+        self._link_item = item_of
 
     def set_link_stepper(self, step: Callable[[dict, int], bool]) -> None:
         """`step(item, delta)`: channel up/down while `item` plays, when it is a link kept in
@@ -6298,9 +6309,17 @@ class TVController(QObject):
             self.nav.changed.emit()
 
     def _on_context(self, node: NavNode, global_pos: Where) -> None:
-        """A right-click on a drawer row (or the menu key on it, 2.13.1): its context menu."""
-        if not self._closed:
-            self._context.show(node, global_pos, self.overlays.drawer)
+        """A right-click on a drawer row (or the menu key on it, 2.13.1): its context menu. A
+        link of Network streams' (its row, or the find's: keyed by its id) is the kept link's,
+        as it plays."""
+        if self._closed:
+            return
+        if node.layer == LINK_LAYER:
+            kept = self._link_item(node.key)
+            if kept is not None:
+                self._context.show_link(*kept, global_pos, self.overlays.drawer)
+            return
+        self._context.show(node, global_pos, self.overlays.drawer)
 
     def _context_key(self) -> None:
         """The menu key or Shift+F10 (2.13.1): the channel list's highlighted row's menu,

@@ -64,7 +64,7 @@ from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
-from services.network_streams import FAILED, TIMED_OUT, is_offline, shown_reason
+from services.network_streams import FAILED, FILM, TIMED_OUT, is_offline, shown_reason
 from services.revive import revive_wait
 from services.sessions import SessionManager, Slot, limit_message, records
 from services.vlc_profile import PlayKind
@@ -358,11 +358,17 @@ class PipControls(QObject):
     # ---- keys, clicks and the menu ------------------------------------------------------------
 
     def pip_key(self) -> None:
-        """P: the drawer's highlighted channel small (Ctrl/⌘+P there), else the previous
+        """P: the drawer's highlighted channel small (Ctrl/⌘+P there; a live link of Network
+        streams as it plays, its row's or the find's: a film never), else the previous
         channel, or close the small picture."""
         drawer = self._drawer
         node = drawer.highlighted() if drawer.isVisible() else None
-        if node is not None and is_channel(self._nav, node):
+        if node is not None and drawer.link_key(node) is not None:
+            kept = drawer.kept_link(node)  # never the find's plain dict (no address, no owner)
+            node = kept[0] if kept is not None and kept[1] != FILM else None
+        elif node is not None and not is_channel(self._nav, node):
+            node = None
+        if node is not None:
             self.open_node(node)
             drawer.close_drawer()
         else:

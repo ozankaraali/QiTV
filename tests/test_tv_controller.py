@@ -526,6 +526,15 @@ class FakeDrawer(FakeOverlay):
     def finding(self):
         return self.found
 
+    # Network streams' rows (its list's and the find's) as the real list tells them, of the
+    # links the controller hands it (`set_link_item`)
+    _link_item = staticmethod(lambda key: None)
+    link_key = Drawer.link_key
+    kept_link = Drawer.kept_link
+
+    def set_link_item(self, item_of):
+        self._link_item = item_of
+
     focus_item = None  # the channel the list opened on (its row as its ▶ tells)
 
     def open_drawer(self, focus_key=None, focus_side="right", focus_item=None):
