@@ -191,9 +191,7 @@ TOOLTIPS = {
     "external": N_("Open in external player"),  # i18n: tooltip; VLC or MPV
     "cast": N_("Cast to a TV"),  # i18n: tooltip (2.8): send the picture to a Chromecast
     "volume": N_("Volume (+/−, M)"),  # i18n: tooltip; +, − and M are its keys
-    "slower": N_("Slower"),  # i18n: tooltip of the playback speed's − button
     "speed": N_("Normal speed"),  # i18n: tooltip of the playback speed chip (back to 1x)
-    "faster": N_("Faster"),  # i18n: tooltip of the playback speed's + button
     # i18n: tooltip of ⏮ on the time-shift bar: back to the start of the programme on now
     "start": N_("Programme start"),
     "fwd60": N_("Forward 60 seconds"),  # i18n: tooltip of the time-shift bar's +60 button
@@ -244,6 +242,8 @@ KEY_HINTS = {
     # i18n: tooltip of the Picture button (its panel: aspect ratio, sleep timer
     # and statistics)
     "picture": (N_("Picture, sleep timer and statistics"), "A"),
+    "slower": (N_("Slower"), "["),  # i18n: tooltip of the playback speed's − button
+    "faster": (N_("Faster"), "]"),  # i18n: tooltip of the playback speed's + button
 }
 FAVORITE_KEY = "Ctrl+D"
 GRID_KEY = "V"  # the multiview: its grid, or back to one picture
@@ -2779,9 +2779,7 @@ class Transport(Overlay):
             elif name == "next":
                 self.nextRequested.emit()
             elif name in ("slower", "faster"):
-                index = self._nearest_speed() + (1 if name == "faster" else -1)
-                if 0 <= index < len(SPEEDS):
-                    self._choose_speed(SPEEDS[index])
+                self.step_speed(1 if name == "faster" else -1)
             elif name == "speed":
                 if self._speed != 1.0:
                     self._choose_speed(1.0)
@@ -2838,6 +2836,24 @@ class Transport(Overlay):
             elif name == "more":
                 self.moreRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return
+
+    def speed_steps(self) -> bool:
+        """What plays has a chosen speed: the bar's row, whose speed chip has its − and +
+        where they fit (a film, a channel behind live); not the live edge, live TV without
+        time-shift or the audio dock. Whatever the width: in a row too small for − and +
+        (the mini player's) [ and ] still step it, and the chip reads it where it shows."""
+        return not self._audio and self._shows_bar()
+
+    def step_speed(self, step: int) -> bool:
+        """The speed chip's − (`step` -1) or + (1), clicked or [ and ] pressed: the next of
+        SPEEDS, nothing past either end. False, and nothing changes, without a chosen speed
+        (`speed_steps`)."""
+        if not self.speed_steps():
+            return False
+        index = self._nearest_speed() + (1 if step > 0 else -1)
+        if 0 <= index < len(SPEEDS):
+            self._choose_speed(SPEEDS[index])
+        return True
 
     def _choose_speed(self, rate: float) -> None:
         self._speed = rate

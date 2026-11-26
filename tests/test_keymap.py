@@ -186,6 +186,62 @@ class ClosedKeymapTests(unittest.TestCase):
         self.assertEqual(closed(K.Key_X, "x"), (Action.STOP, ""))
         self.assertEqual(guide(K.Key_X, "x"), (Action.STOP, ""))
 
+    def test_brackets_step_the_speed_on_the_player_and_in_the_guide(self):
+        # [ and ] are the speed chip's − and + (VLC's and mpv's keys); the lists type them.
+        for context in ("player", "guide"):
+            for key, text, action in (
+                (K.Key_BracketLeft, "[", Action.SLOWER),
+                (K.Key_BracketRight, "]", Action.FASTER),
+            ):
+                with self.subTest(context=context, text=text):
+                    self.assertEqual(resolve(key.value, NONE, text, context=context), (action, ""))
+                    self.assertEqual(resolve(key.value, NONE, "", context=context), (action, ""))
+        for context in ("drawer", "library", "subtitles"):
+            self.assertEqual(
+                resolve(K.Key_BracketLeft.value, NONE, "[", context=context), (Action.NAV_TEXT, "[")
+            )
+
+    def test_brackets_typed_with_option_or_altgr_step_the_speed(self):
+        # The owner's Turkish keyboard: on a Mac [ and ] are ⌥8 and ⌥9 (Qt may name the key
+        # 8 or [), on Windows AltGr+8 and AltGr+9 (Ctrl+Alt there); the text is what counts.
+        for platform, mods in (("darwin", ALT), ("win32", CTRL | ALT), ("linux", ALT)):
+            for key, text, action in (
+                (K.Key_8, "[", Action.SLOWER),
+                (K.Key_9, "]", Action.FASTER),
+                (K.Key_BracketLeft, "[", Action.SLOWER),
+                (K.Key_BracketRight, "]", Action.FASTER),
+            ):
+                with self.subTest(platform=platform, key=key, text=text):
+                    self.assertEqual(
+                        resolve(key.value, mods, text, context="player", platform=platform),
+                        (action, ""),
+                    )
+        self.assertEqual(  # ⌥8 is not the digit 8
+            resolve(K.Key_8.value, ALT, "[", context="guide", platform="darwin"),
+            (Action.SLOWER, ""),
+        )
+
+    def test_cmd_and_ctrl_brackets_stay_shortcuts(self):
+        # ⌘[ and ⌘] (Ctrl elsewhere), ⌘⌥ and Ctrl+Alt outside Windows, the Mac's Control: never
+        # the speed, whatever text the platform gives them.
+        cases = [
+            (platform, mods, key, text)
+            for platform in ("darwin", "win32", "linux")
+            for mods in (CTRL, META, CTRL | SHIFT)
+            for key, text in ((K.Key_BracketLeft, "["), (K.Key_BracketRight, "]"))
+        ]
+        cases += [(p, CTRL | ALT, K.Key_8, "[") for p in ("darwin", "linux")]
+        cases += [
+            ("win32", CTRL, K.Key_BracketLeft, "\x1b"),
+            ("win32", CTRL | ALT | META, K.Key_8, "["),
+        ]
+        for platform, mods, key, text in cases:
+            with self.subTest(platform=platform, mods=mods, key=key, text=text):
+                self.assertIsNone(
+                    resolve(key.value, mods, text, context="player", platform=platform)
+                )
+                self.assertIsNone(resolve(key.value, mods, "", context="player", platform=platform))
+
 
 class AsIntTests(unittest.TestCase):
     def test_accepts_enums_ints_and_none(self):

@@ -72,6 +72,9 @@ class Action(str, Enum):
     STOP = "stop"  # X, ■: every picture stops and nothing streams; Space plays it again (2.6)
     # 2.13.1: the menu key or Shift+F10: the highlighted row's menu, as its right-click opens it
     CONTEXT_MENU = "context_menu"
+    # [ and ]: the speed chip's − and + (VLC's and mpv's keys; S swaps the pictures here)
+    SLOWER = "slower"
+    FASTER = "faster"
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
@@ -132,7 +135,12 @@ _PLAYER_CHARS = {
     _K.Key_R.value: Action.RECORD,
     _K.Key_A.value: Action.PICTURE,  # VLC's aspect key: the panel opens on the aspect ratio
     _K.Key_X.value: Action.STOP,
+    _K.Key_BracketLeft.value: Action.SLOWER,
+    _K.Key_BracketRight.value: Action.FASTER,
 }
+# [ and ] by the text they type too: on a Mac's Turkish keyboard they are ⌥8 and ⌥9, on Windows
+# often AltGr (Ctrl+Alt); ⌘[ and ⌘] (Ctrl elsewhere) stay shortcuts.
+_SPEED_TEXT = {"[": Action.SLOWER, "]": Action.FASTER}
 # With Shift, the sound's sync keys move the subtitles, and I (the channel's info) shows the
 # picture's statistics (the player only).
 _PLAYER_SHIFT_CHARS = {
@@ -180,6 +188,8 @@ _GUIDE_CHARS = {
         _K.Key_Plus.value,
         _K.Key_Equal.value,
         _K.Key_Minus.value,
+        _K.Key_BracketLeft.value,
+        _K.Key_BracketRight.value,
     )
 }
 # The Library (spec §5.4): the drawer's keys plus Home/End. It types like the drawer, so "/"
@@ -274,6 +284,8 @@ def resolve(
         return keys[key], ""
     if key in _CHANNEL_KEYS:
         return _CHANNEL_KEYS[key], ""
+    if text in _SPEED_TEXT and _text(text, mods, windows=platform.startswith("win")):
+        return _SPEED_TEXT[text], ""  # whatever produced it but ⌘/Ctrl or Meta (AltGr types)
     if held:
         return None
     if _K.Key_0.value <= key <= _K.Key_9.value:
@@ -340,6 +352,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Backspace", N_("Previous channel")),
         ("Return", N_("Channel list")),
         ("Left, Right", N_("Back / forward 10 seconds")),
+        # i18n: what [ and ] do: the speed chip's − and + (0.5x … 3x)
+        ("[, ]", N_("Playback speed: slower / faster")),
         ("Space", N_("Play / pause")),
         ("X", N_("Stop: nothing plays or streams (Space plays it again)")),
         ("L", N_("Go live")),

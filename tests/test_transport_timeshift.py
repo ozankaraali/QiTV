@@ -244,6 +244,18 @@ class TimeShiftCase(unittest.TestCase):
         self.click(t, t.button_rect("faster").center().toPoint())
         self.assertEqual(speed.at(1)[0], 1.25)
 
+    def test_the_speed_keys_do_nothing_at_the_live_edge(self):
+        # [ and ]: at the live edge the row has no − and +, so nothing (stay-live's nudges are
+        # not a chosen speed); behind live they step as the buttons do.
+        t = self.shifted()
+        speed = QSignalSpy(t.speedRequested)
+        t.update_timeline(at_edge(lag=4.0, rate=1.05), PROGRAMME)
+        self.assertEqual((t.step_speed(1), t.step_speed(-1)), (False, False))
+        self.assertEqual(speed.count(), 0)
+        t.update_timeline(timeline(), PROGRAMME)
+        self.assertEqual((t.step_speed(1), t.step_speed(1)), (True, True))
+        self.assertEqual([speed.at(i)[0] for i in range(speed.count())], [1.25, 1.5])
+
     def test_clicks_on_the_bar_and_chips_do_not_fall_through(self):
         host = Recorder()
         host.resize(1280, 720)

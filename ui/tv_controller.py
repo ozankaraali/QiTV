@@ -2088,6 +2088,8 @@ class TVController(QObject):
             Action.STATS: self._picture.toggle_stats,
             Action.VOL_UP: lambda: self._change_volume(VOLUME_STEP),
             Action.VOL_DOWN: lambda: self._change_volume(-VOLUME_STEP),
+            Action.SLOWER: lambda: self._step_speed(-1),
+            Action.FASTER: lambda: self._step_speed(1),
             Action.ESCAPE: self._escape,
             Action.NAV_UP: lambda: drawer.move_by(-1),
             Action.NAV_DOWN: lambda: drawer.move_by(1),
@@ -2102,6 +2104,17 @@ class TVController(QObject):
             Action.CONTEXT_MENU: self._context_key,  # 2.13.1: Menu, Shift+F10
         }
         return calls.get(action)
+
+    def _step_speed(self, step: int) -> None:
+        """[ and ]: the speed chip's − and +, as a click on them, at any width; the controls
+        show, so the chip reads the speed (at either end too). Without a chosen speed (the
+        live edge, live TV without time-shift, a song), nothing. The controls show first: a
+        channel's come back with its last timeline, whose rate is the one before the step."""
+        transport = self.overlays.transport
+        if self._current is None or not transport.speed_steps():
+            return
+        self._show_transport()
+        transport.step_speed(step)
 
     def _play_pause(self) -> None:
         if self._stopped is not None and self._current is None:

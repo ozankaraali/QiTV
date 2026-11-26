@@ -523,8 +523,32 @@ class TransportCase(unittest.TestCase):
         self.assertEqual(rates, expected)
         lefts = [t.button_rect(n).left() for n in ("slower", "speed", "faster")]
         self.assertEqual(lefts, sorted(lefts))
-        self.assertEqual(t.tooltip_at(t.button_rect("faster").center()), "Faster")
-        self.assertEqual(t.tooltip_at(t.button_rect("slower").center()), "Slower")
+        self.assertEqual(t.tooltip_at(t.button_rect("faster").center()), "Faster (])")
+        self.assertEqual(t.tooltip_at(t.button_rect("slower").center()), "Slower ([)")
+
+    def test_the_speed_keys_step_as_the_buttons_do(self):
+        # [ and ] (step_speed, the buttons' own): the same steps and ends, while the controls
+        # have faded too; True while the row has − and +, at either end as well.
+        t = self.make()
+        t.show_vod("A", "b")
+        t.dismiss()
+        spy = QSignalSpy(t.speedRequested)
+        steps = [t.step_speed(1) for _ in range(6)] + [t.step_speed(-1) for _ in range(9)]
+        self.assertEqual(steps, [True] * 15)
+        rates = [spy.at(i)[0] for i in range(spy.count())]
+        self.assertEqual(rates, [1.25, 1.5, 1.75, 2.0, 3.0, 2.0, 1.75, 1.5, 1.25, 1.0, 0.75, 0.5])
+        self.assertFalse(t.isVisible())  # (showing them is the controller's)
+
+    def test_the_speed_keys_do_nothing_without_a_chosen_speed(self):
+        # Live TV has no speed chip, nor has a song's dock: no speed to step, nothing.
+        t = self.make()
+        spy = QSignalSpy(t.speedRequested)
+        t.show_live("104", "Nature")
+        self.assertNotIn("faster", t._layout())
+        self.assertEqual((t.step_speed(1), t.step_speed(-1)), (False, False))
+        t.show_audio("Ferries at Night", "Mira Sol")
+        self.assertEqual((t.step_speed(1), t.step_speed(-1)), (False, False))
+        self.assertEqual(spy.count(), 0)
 
     def test_the_speed_chip_fits_its_text_in_a_small_window(self):
         # "1.25x" was cut off: the chip shrank with the window, its font stops at a floor.
@@ -1270,6 +1294,29 @@ class SmallWidthLayoutTests(unittest.TestCase):
                 self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [1.0])
                 t.set_speed(1.5)
         self.assertEqual(states[640], ("slower", "speed", "faster"))
+
+    def test_the_speed_keys_step_in_a_row_too_small_for_minus_and_plus(self):
+        # A channel behind live has a chosen speed at any width: where − and + give way (the
+        # mini player's), [ and ] step it all the same, and the chip alone reads the new one.
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.set_pip_state(True, False)
+        t.show_timeshift("One", "")
+        narrow = set()
+        for width in range(300, 642, 2):
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.update_timeline(self.state("shifted", 300.0, 1.0), [])
+            rects = t._layout()
+            if "slower" in rects:
+                continue
+            narrow.add("speed" in rects)
+            spy = QSignalSpy(t.speedRequested)
+            with self.subTest(width=width, chip="speed" in rects):
+                self.assertTrue(t.step_speed(1))
+                self.assertTrue(t.step_speed(1))
+                self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [1.25, 1.5])
+                self.assertEqual(t._speed, 1.5)  # what the chip reads, where it shows
+        self.assertIn(True, narrow)  # a width with the chip alone was tried
 
     def test_the_title_rows_controls_stay_inside_at_any_width(self):
         for width in self.WIDTHS:
