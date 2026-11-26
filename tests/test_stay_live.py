@@ -86,13 +86,36 @@ class ModeTests(unittest.TestCase):
         self.assertIs(sl.mode, Mode.SHIFTED)
         self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(0.5))
 
-    def test_pause_from_catching_up_is_shifted_at_normal_speed(self):
+    def test_a_pause_keeps_a_chosen_speed_and_its_easing_into_live(self):
+        # 2.15, the owner: "my speed resets to 1x" (2.0 to 2.14: a pause ended it)
         sl, clock = StayLive(), Clock()
         sl.user_paused()
+        self.assertEqual(sl.chosen_rate, 1.0)
         sl.user_speed(1.5)
         sl.user_paused()
-        self.assertIs(sl.mode, Mode.SHIFTED)
-        self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.0))
+        self.assertIs(sl.mode, Mode.CATCHING_UP)
+        self.assertEqual(sl.chosen_rate, 1.5)
+        self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.5))
+        S = T + 0.2
+        self.assertEqual(sl.update(S + 1.5, False, now=clock.tick()), Decision(1.25))  # as ever
+        sl.user_paused()
+        self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
+        self.assertEqual(sl.update(S, False, now=clock.tick()), Decision(1.0))
+        self.assertIs(sl.mode, Mode.LIVE)
+        self.assertEqual(sl.chosen_rate, 1.0)
+        sl.user_paused()
+        sl.user_speed(0.5)
+        sl.user_paused()  # a slower one too
+        self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(0.5))
+
+    def test_a_pause_ends_stay_lives_own_catch_up(self):
+        stay, clock = live(), Clock()
+        _, rates = drive(stay, T + 12.0, 30.0, clock=clock)
+        self.assertGreater(max(rates), 1.0)  # far behind: stay-live's own catch-up
+        stay.user_paused()
+        self.assertIs(stay.mode, Mode.SHIFTED)
+        self.assertEqual(stay.chosen_rate, 1.0)
+        self.assertEqual(stay.update(T + 12.0, False, now=clock.tick()), Decision(1.0))
 
     def test_buffering_in_shifted(self):
         sl, clock = StayLive(), Clock()

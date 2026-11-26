@@ -2349,21 +2349,40 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["rate"], 1.5)
         self.assertEqual(self.playback.rates, [1.5])
 
-    def test_a_pause_ends_a_catch_up_at_normal_speed(self):
+    def test_a_pause_keeps_a_chosen_speed(self):
+        # 2.15, the owner: "my speed resets to 1x". As in a video player, play after a pause
+        # goes on at the speed the viewer chose (2.0 to 2.14: at 1x), and the chip says so.
         self.ready(segments(0, 10), live_edge=20.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.live.seek_to(2.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.live.set_speed(1.5)
         self.step(0.25, media=0.375)
-        self.assertEqual(self.timelines[-1]["mode"], "catching_up")
         self.live.toggle_pause()
-        self.assertEqual(self.playback.rates, [1.5, 1.0])
         self.step(0.25, media=0)
-        self.assertEqual((self.timelines[-1]["mode"], self.timelines[-1]["rate"]), ("shifted", 1.0))
+        self.live.toggle_pause()
+        self.step(0.25, media=0.375)
+        self.assertEqual(self.playback.rates, [1.5])
+        state = self.timelines[-1]
+        self.assertEqual((state["mode"], state["rate"]), ("catching_up", 1.5))
+        transport = Transport(None, idle_ms=3000)
+        self.addCleanup(transport.deleteLater)
+        transport.update_timeline(state, [])
+        self.assertEqual(transport._speed, 1.5)
+
+    def test_a_pause_still_ends_stay_lives_own_catch_up(self):
+        sid = self.ready(segments(0, 7), live_edge=14.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        for k in range(1, 16):  # the source sends on, 11.5 s more than the target
+            self.engine.buffer(sid, segments(0, 7), live_edge=14.0 + 0.25 * k)
+            self.step(0.25)
+        self.assertGreater(self.playback.rates[-1], 1.0)  # far behind: stay-live's catch-up
+        self.live.toggle_pause()
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.step(0.25, media=0)
         self.live.toggle_pause()  # resumes at 1x, time-shifted
         self.step(0.25)
-        self.assertEqual(self.playback.rates, [1.5, 1.0])
+        self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertEqual((self.timelines[-1]["mode"], self.timelines[-1]["rate"]), ("shifted", 1.0))
 
     def test_a_pause_while_waiting_applies_once_it_plays(self):
@@ -5480,6 +5499,22 @@ class InterruptionTests(LiveSessionCase):
         self.step(300.0, media=0)
         self.engine.buffer(sid, segments(150, 6, start=300.0), live_edge=312.5)
 
+    def test_a_long_pause_past_the_ring_reopens_at_a_chosen_speed(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(0.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_speed(1.5)
+        self.step(0.25, media=0.375)
+        self.pause_past_the_ring(sid)
+        plays = len(self.playback.plays)
+        self.live.toggle_pause()
+        self.assertEqual(len(self.playback.plays), plays + 1)  # reopened in the ring
+        self.assertEqual(self.playback.rates[-1], 1.5)  # (for the new media too)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25, media=0.375)
+        self.assertEqual(self.timelines[-1]["rate"], 1.5)
+
     def test_a_long_pause_past_the_ring_rewinds_a_margin_past_the_oldest(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
@@ -8461,6 +8496,25 @@ class ServerWindowTests(LiveSessionCase):
         self.assertNotIn(REWOUND, self.notices)
         self.assertNotIn(part, self.engine.closed)
 
+    def test_a_chosen_speed_holds_in_a_part_through_a_pause_and_a_step(self):
+        # 2.15: a provider's part as a site's recording (its pace is the player's media ahead)
+        self.in_part(-300.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.live.set_speed(1.5)
+        self.live.toggle_pause()
+        self.step(1.0, media=0)
+        self.live.toggle_pause()
+        self.step(0.25, media=0.375)
+        self.live.seek_to(-294.0)  # a step within it
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25, media=0.375)
+        self.assertTrue(self.live.in_server_part())
+        self.assertEqual(self.playback.rates[-1], 1.5)
+        self.assertEqual(
+            (self.timelines[-1]["rate"], self.timelines[-1]["mode"]), (1.5, "catching_up")
+        )
+
     def test_a_second_step_back_past_the_part_waits_for_the_new_one(self):  # I1
         _sid, part = self.in_part(-300.0)
         self.live.seek_to(-600.0)  # beyond what the part holds: a new part
@@ -8861,6 +8915,61 @@ class SiteRecordingTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)  # nothing moved it
         self.assertAlmostEqual(self.live.position(), before + 2.0, delta=0.3)
         self.assertTrue(self.live.in_server_part())
+
+    def chosen(self):
+        """VLC's rate, the bar's and stay-live's mode."""
+        self.live._emit_timeline()
+        return self.playback.rates[-1], self.timelines[-1]["rate"], self.timelines[-1]["mode"]
+
+    def test_a_chosen_speed_holds_in_the_recording(self):
+        # 2.15, the owner: "when i seek back, i realize my speed resets to 1x". It holds until
+        # the viewer changes it, Go live, or the picture reaches live.
+        self.playing()
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=n) for n in range(6)]
+        self.in_recording(-1_800.0, own, part_date=8_195.0, part_start=1_795.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(1.0)
+        self.live.set_speed(1.5)
+        held = (1.5, 1.5, "catching_up")
+        self.advance(60.0)  # to what the part fetched (-1,745): VLC waits there for more
+        self.playback.set_state(PlaybackState.BUFFERING)
+        for _ in range(20):
+            self.clock.now += 0.25
+            self.live._tick()
+        self.assertEqual(self.chosen(), held)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()  # a pause and play
+        self.advance(2.0)
+        self.live.toggle_pause()
+        self.advance(1.0)
+        self.assertEqual(self.chosen(), held)
+        self.live.seek_to(-2_400.0)  # back past it: another part opens ...
+        self.advance(2.0)
+        self.assertEqual(self.chosen(), held)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, own, hls=True, part_date=7_595.0, part_start=1_195.0)
+        self.engine.sessionReady.emit(part)  # ... and plays
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(1.0)
+        self.assertAlmostEqual(self.live.position(), -2_404.0, delta=0.5)
+        self.assertEqual(self.chosen(), held)
+        self.live.seek_to(50.0)  # into the buffer
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(1.0)
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(self.chosen(), held)
+
+    def test_a_chosen_speed_holds_across_the_join(self):
+        self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
+        self.engine.sessionEnded.emit(part)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(1.0)
+        self.live.set_speed(1.5)
+        self.advance(24.0)
+        self.assertFalse(self.live.in_server_part())
+        self.assertEqual(self.chosen(), (1.5, 1.5, "catching_up"))
 
     def test_where_no_buffer_segment_begins_there_vlc_opens_the_buffer_at_its_end(self):
         spans = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=500 + n) for n in range(30)]

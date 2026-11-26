@@ -1360,8 +1360,10 @@ class LiveSession(QObject):
         self._held, self._ad_held = None, False  # the viewer's pause or play from here
         self._caption_held = None  # (the AI captions' wait too: PlaybackSession's pause is it)
         if not self._paused:
-            # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
-            # or while recovering it is remembered: the stream that opens next is paused.
+            # From any mode, stay-live's own nudge or catch-up included: paused at 1x,
+            # time-shifted; 2.15: at a speed the viewer chose, at that speed (it plays on so,
+            # in the buffer and in a server part). Before ready or while recovering it is
+            # remembered: the stream that opens next is paused.
             self._paused = True
             self._end_picture()  # a pause ends the look (an open paused before it played: none)
             if self._aim_since is not None and self._retry in (_Retry.GO_LIVE, _Retry.REOPEN):
@@ -1369,8 +1371,8 @@ class LiveSession(QObject):
                 # (review M4: the wait went on and opened at live under the pause).
                 self._retry = None
                 self._end_aim()
-            self._set_rate(1.0)
             self._stay.user_paused()
+            self._set_rate(self._stay.chosen_rate)
             if playing:
                 self._playback.set_paused(True)
             return
