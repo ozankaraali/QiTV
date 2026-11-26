@@ -3062,6 +3062,9 @@ class TVWindow(QMainWindow):
             # shortcut only for a widget shown, and the window is hidden.
             window.addActions(self.actions())
             host.follow_window(window)
+            # Its edges win over them (ui/small_window.py), and they stay up through a resize
+            # from there.
+            window.guard(host, self.overlays.transport.stay_up)
             macos_window.join_all_spaces(host)  # beside the small window on every desktop
             # QiTV's window now (none left on another desktop to bring): a press on it, or on
             # its controls, brings QiTV forward, as the window did.
@@ -3069,6 +3072,8 @@ class TVWindow(QMainWindow):
             macos_window.let_presses_activate(host)
             QTimer.singleShot(0, host, host.sync_geometry)  # (its Show came before its place)
         else:
+            if window is not None:
+                window.guard(None)
             host.follow_window(self)
             macos_window.leave_all_spaces(host)
             if self._mini_restore is not None and _macos_desktops():

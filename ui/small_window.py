@@ -5,7 +5,9 @@ the mini player's (ui/mini_player.py: the whole player page, under the window's 
 
 It has its picture's shape, so it shows no bars (`set_ratio`: as large as it was, its corner
 nearest the screen's corner staying where it is). Its edges and corners resize it in that shape
-(a press within EDGE_PX of them; the pointer says so near them); while the shape is not known
+(a press within their band, `band`; the pointer says so near them), whatever is under the press
+there: the window of its controls over it too (`guard`: the owner found the edges hard to
+catch while they showed, as they took the presses and the moves); while the shape is not known
 (or fits any: Fill) it keeps the one it has. Qt makes a frameless window resizable by macOS
 itself too, at its very edges, without a press QiTV sees (2.13.5: the owner's black bars after
 a resize): macOS keeps the shape as they are dragged, between the smallest window and the
@@ -26,8 +28,8 @@ from __future__ import annotations
 import math
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPalette
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QMouseEvent, QPalette, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
@@ -36,7 +38,17 @@ from ui.macos_window import reclaim_first_responder
 
 WIDTH_FRACTION = 0.25  # a quarter of the screen's width, 16:9
 MARGIN = 24  # from the screen's corner
-EDGE_PX = 10  # a press this near an edge (or two: a corner) resizes the small window
+# Its edges' grab band (`band`): a press this near an edge resizes it, and one along an edge
+# this near the next edge resizes it by their corner. A thirtieth of its width, EDGE_PX at most
+# (from 420 px wide): its controls are drawn in units of a hundredth of the width
+# (ui.overlays.painting), the nearest about 3 units in (the star's middle 3.75 from the top), so
+# each keeps its middle out of the band at every size and shape. A corner runs along its edges,
+# not into the picture as a square: ▶ and ⛶ sit there (a 24 px square covers ⛶ whole 360 px
+# wide). Neither is more than a fifth of its smaller side: a small window is dragged by its middle.
+EDGE_PX = 14
+EDGE_SHARE = 1 / 30
+CORNER_PX = 24
+BAND_SHARE = 1 / 5
 MIN_WIDTH = 240  # the smallest it gets in 16:9 (another shape: as large as that)
 SNAP_MS = 150  # a resize it did not make (macOS's own) ends in its picture's shape this soon
 HOVER_MS = 150  # how often the pointer's place is asked while QiTV is not the active app
@@ -57,8 +69,73 @@ def _no_lock(_widget: QWidget, _shape: float, _smallest: QSize, _largest: QSize)
     return None
 
 
+def _no_keep_up(_on: bool) -> None:
+    return None
+
+
 def _qitv_active() -> bool:
     return QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+
+
+class _Guard(QObject):
+    """A window over a small window, its controls' (`SmallWindow.guard`): each mouse event on
+    its QWindow is the small window's to take first, before any widget of it sees one."""
+
+    def __init__(self, small: SmallWindow, host: QWidget, keep_up: Callable[[bool], object]):
+        super().__init__(small)
+        self._small, self._host, self.keep_up = small, host, keep_up
+        self._handle: Optional[QWindow] = None
+        self._pointing = False  # the resize pointer shows on its window
+        host.installEventFilter(self)  # (its QWindow made anew, it hides)
+        self._watch()
+
+    def _watch(self) -> None:
+        if self._host.windowHandle() is None:
+            self._host.winId()  # (its QWindow, where the mouse comes)
+        handle = self._host.windowHandle()
+        if handle is not self._handle:
+            if self._handle is not None and isValid(self._handle):
+                self._handle.removeEventFilter(self)
+            self._handle = handle
+            if handle is not None:
+                handle.installEventFilter(self)
+
+    def point(self, shape: Optional[Qt.CursorShape], local: QPoint) -> None:
+        """The resize pointer `shape` on its window; None: the widget's under `local` again."""
+        handle = self._handle
+        if handle is None or not isValid(handle):
+            return
+        if shape is not None:
+            handle.setCursor(shape)
+            self._pointing = True
+        elif self._pointing:
+            self._pointing = False
+            handle.setCursor((self._host.childAt(local) or self._host).cursor())
+
+    def unpoint(self) -> None:
+        if self._pointing and self._handle is not None and isValid(self._handle):
+            self._handle.unsetCursor()
+        self._pointing = False
+
+    def drop(self) -> None:
+        self.unpoint()
+        if isValid(self._host):
+            self._host.removeEventFilter(self)
+        if self._handle is not None and isValid(self._handle):
+            self._handle.removeEventFilter(self)
+        self._handle = None
+        self.deleteLater()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._host:
+            if event.type() == QEvent.Type.WinIdChange:
+                self._watch()
+            elif event.type() == QEvent.Type.Hide:
+                self.unpoint()
+            return False
+        if watched is self._handle and isinstance(event, QMouseEvent):
+            return self._small._host_mouse(self, event)
+        return False
 
 
 class HoverPoll(QObject):
@@ -149,6 +226,8 @@ class SmallWindow(QWidget):
         self._press: Optional[QPoint] = None  # where a press began (global)
         self._dragged = False
         self._edges: tuple[bool, bool, bool, bool] = (False, False, False, False)  # l, t, r, b
+        self._guard: Optional[_Guard] = None  # the window of its controls over it
+        self._pressed_on: Optional[_Guard] = None  # the press began there (on its band)
         self._start = QRect()  # the window's geometry when a resize began
         self._ratio: Optional[float] = None  # its picture's shape (None: it keeps its own)
         self._reshape_due = False  # a new shape came during a press or macOS's resize
@@ -253,15 +332,26 @@ class SmallWindow(QWidget):
 
     # ---- its edges ----------------------------------------------------------------------------
 
+    def band(self) -> tuple[int, int]:
+        """Its edges' grab band now: how near an edge a press resizes it, and how far along an
+        edge its corner reaches (EDGE_PX and the rest above)."""
+        width, height = self.width(), self.height()
+        most = math.floor(min(width, height) * BAND_SHARE)
+        return min(EDGE_PX, math.floor(width * EDGE_SHARE), most), min(CORNER_PX, most)
+
     def _edges_at(self, point: QPoint) -> tuple[bool, bool, bool, bool]:
-        """The edges (left, top, right, bottom) `point` (window coordinates) is near."""
-        rect = self.rect()
-        return (
-            point.x() < EDGE_PX,
-            point.y() < EDGE_PX,
-            point.x() >= rect.width() - EDGE_PX,
-            point.y() >= rect.height() - EDGE_PX,
-        )
+        """The edges (left, top, right, bottom) `point` (window coordinates) is near: within the
+        band of one, and along it near the next one, both (their corner)."""
+        if not self.rect().contains(point):
+            return (False, False, False, False)
+        edge, corner = self.band()
+        x, y, width, height = point.x(), point.y(), self.width(), self.height()
+        left, top, right, bottom = x < edge, y < edge, x >= width - edge, y >= height - edge
+        if left or right:
+            top, bottom = top or y < corner, bottom or y >= height - corner
+        if top or bottom:
+            left, right = left or x < corner, right or x >= width - corner
+        return left, top, right, bottom
 
     def _cursor_for(self, edges: tuple[bool, bool, bool, bool]) -> Optional[Qt.CursorShape]:
         left, top, right, bottom = edges
@@ -294,9 +384,81 @@ class SmallWindow(QWidget):
         if self._cursor_on is not None and isValid(self._cursor_on):
             self._cursor_on.unsetCursor()
         self._cursor_on = None
+        if self._guard is not None:
+            self._guard.unpoint()
+
+    # ---- the window over it (its controls') ---------------------------------------------------
+
+    def guard(
+        self, host: Optional[QWidget], keep_up: Callable[[bool], object] = _no_keep_up
+    ) -> None:
+        """`host`, a window over this one (its controls' overlay host), leaves it the mouse
+        within its edges' band, whatever lies under it there (`_host_mouse`, on the host's
+        window before any widget of it): a left press resizes it, a move shows the resize
+        pointer. `keep_up(True)` keeps the controls up through a resize begun there,
+        `keep_up(False)` once it ends. None: no window over it any more."""
+        self._release_controls()
+        if self._guard is not None:
+            self._guard.drop()
+        self._guard = _Guard(self, host, keep_up) if host is not None else None
+
+    def _host_mouse(self, guard: _Guard, event: QMouseEvent) -> bool:
+        """A mouse event on `guard`'s window, over this one: the edges' (True) when it is a left
+        press within the band, a move or the release of a press begun there, or a move without
+        a button within the band (the resize pointer, on that window); else that window's."""
+        if not self.isVisible():
+            return False
+        kind, left = event.type(), Qt.MouseButton.LeftButton
+        where = event.globalPosition().toPoint()
+        press = kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
+        if self._press is not None:  # a press goes on: one begun there is all the edges'
+            if self._pressed_on is not guard:
+                return False  # (its picture's)
+            if press and event.button() == left:
+                self._edge_press(event)  # (a double-click's second press)
+                self._hold_controls(guard)
+            elif kind == QEvent.Type.MouseMove and event.buttons() & left:
+                self._resize_to(where)
+            elif kind == QEvent.Type.MouseMove or (
+                kind == QEvent.Type.MouseButtonRelease and event.button() == left
+            ):
+                self._end_press()  # released (a move without the button: the release was lost)
+            return True
+        edges = self._edges_at(self.mapFromGlobal(where))
+        if press and event.button() == left and any(edges):
+            self._edge_press(event)
+            self._hold_controls(guard)
+            return True
+        if kind == QEvent.Type.MouseMove and not event.buttons():
+            guard.point(self._cursor_for(edges), event.position().toPoint())
+            return any(edges)
+        return False  # (a control's press, its drag, a right-click)
+
+    def _edge_press(self, event: QMouseEvent) -> None:
+        """A left press (or a double-click) within the band on the window over it: as one on
+        its picture there (a resize begins)."""
+        self._begin_press(event.globalPosition().toPoint())
+
+    def _hold_controls(self, guard: _Guard) -> None:
+        if self._press is not None:
+            self._pressed_on = guard
+            guard.keep_up(True)
+
+    def _release_controls(self) -> None:
+        guard, self._pressed_on = self._pressed_on, None
+        if guard is not None:
+            guard.keep_up(False)
+
+    # ---- a press ------------------------------------------------------------------------------
+
+    def _drop_press(self) -> None:
+        """No press any more (released, or the picture went back): its controls may fade."""
+        self._press, self._dragged = None, False
+        self._release_controls()
 
     def _begin_press(self, where: QPoint) -> bool:
         """A left press at `where` (global): True when it is on an edge (a resize begins)."""
+        self._release_controls()
         self._press, self._dragged = where, False
         self._edges = self._edges_at(self.mapFromGlobal(where))
         self._start = self.geometry()
@@ -341,7 +503,7 @@ class SmallWindow(QWidget):
         """The left button came up: a move or a resize is told (a click alone does nothing
         here). A shape that came meanwhile applies."""
         dragged = self._press is not None and self._dragged
-        self._press, self._dragged = None, False
+        self._drop_press()
         if dragged:
             self._expected = self.geometry()
             self.placed.emit(self.geometry())

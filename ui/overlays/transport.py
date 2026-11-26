@@ -602,6 +602,7 @@ class Transport(Overlay):
         self._failed = False  # a live channel that failed to open (show_failed)
         self._quality = False  # 2.8: its server offers versions or conversions: ⚙ shows
         self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
+        self._stay = False  # no fade meanwhile either (`stay_up`)
         self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
@@ -1144,6 +1145,15 @@ class Transport(Overlay):
         """The button whose panel is open ("": none)."""
         return self._held
 
+    def stay_up(self, on: bool) -> None:
+        """No fade while `on`: a resize of the small window it is over, begun on its edge
+        (ui/small_window.py); off, the fade starts again. Hidden, it stays hidden."""
+        self._stay = on
+        if on:
+            self._idle.stop()
+        elif self.isVisible():
+            self._fade_later()
+
     def add_mirror(self, mirror: "Transport") -> None:
         """`mirror` (the player controls over another window: the desktop picture in picture's,
         ui/float_controls.py) shows what this one does from now on: what was said so far (each
@@ -1176,7 +1186,7 @@ class Transport(Overlay):
             self.poke()
 
     def _fade_later(self) -> None:
-        if not self._held and not self._audio:
+        if not self._held and not self._audio and not self._stay:
             self._idle.start()
 
     def dismiss(self) -> None:

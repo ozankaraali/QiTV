@@ -31,6 +31,9 @@ Its clicks:
   takes a press only on its drawn place (`REACH_PX` around it), not on the larger hit area it
   has over the window (the owner, 2.13.5: clicks on the small picture opened the guide in the
   window, its hit area covering most of the bottom there).
+- Within the floating window's edge band its edges win, over a control too
+  (ui/small_window.py's `guard`): a press there resizes it, the pointer says so, and the
+  controls stay up through the resize.
 - The wheel does nothing (a scroll drifting over it from another app never zaps), nor do the
   keys: it never takes the keyboard.
 """
@@ -47,6 +50,7 @@ from shiboken6 import isValid
 
 from ui.overlay_host import OverlayHost
 from ui.overlays.transport import Transport
+from ui.small_window import SmallWindow
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +137,8 @@ class FloatControls(QObject):
         transport.add_mirror(mirror)  # (before the host hosts it: it shows nothing meanwhile)
         self.host.add_overlay(mirror)  # (hidden: it shows on a hover)
         mirror.installEventFilter(self)
+        if isinstance(window, SmallWindow):
+            window.guard(self.host, mirror.stay_up)  # its edges win over these controls
         for name in requests():
             signal = getattr(mirror, name)
             if name in IN_PLACE or name == MUTE:
