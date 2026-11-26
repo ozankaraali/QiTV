@@ -101,6 +101,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Return"): (("picture", "click"),),
     # Movies and a channel behind live: ◀10 10▶; at a time-shifted channel's live edge: ◀10.
     ("player", "Left, Right"): (("transport", "back10"), ("transport", "fwd10")),
+    ("player", "[, ]"): (("transport", "slower"), ("transport", "faster")),  # the speed chip's
     ("player", "Space"): (("transport", "play"),),
     ("player", "X"): (("transport", "stop"),),  # 2.6: ■ beside ▶
     ("player", "L"): (("transport", "golive"),),
@@ -299,6 +300,7 @@ AUDIO_EXEMPT: dict[tuple[str, str], str] = {
     ("player", "S"): _LIVE + " (swaps the second channel's small picture)",
     ("player", "V"): _LIVE + " (the multiview)",
     ("player", "Tab, Shift+Tab"): _LIVE + " (the multiview's tiles)",
+    ("player", "[, ]"): "the dock has no speed chip (no − and + to click): on a song, nothing",
     ("menu", "Ctrl+4"): _LIVE + " (the multiview)",
     ("menu", "Ctrl+Q"): EXEMPT[("menu", "Ctrl+Q")],
 }
