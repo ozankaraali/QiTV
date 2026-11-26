@@ -24,7 +24,6 @@ from services.live.live_session import (
     PART_FAILED,
     PART_NOT_RECORDED,
     PART_RECORDING,
-    WINDOW_AHEAD_S,
     WINDOW_BAR_S,
     LiveSession,
 )
@@ -8324,7 +8323,7 @@ class ServerWindowTests(LiveSessionCase):
         window = self.engine.opened[-1][2]["window"]
         self.assertEqual(
             window,
-            {"back_s": 900.0, "until_seq": 100, "ahead_s": WINDOW_AHEAD_S, "before_s": 300.0},
+            {"back_s": 900.0, "until_seq": 100, "ahead_s": 60.0, "before_s": 300.0},  # (2.15 too)
         )
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 0))
         self.assertTrue(self.live.in_server_part())
@@ -8368,6 +8367,18 @@ class ServerWindowTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 0))
         self.assertNotIn(part, self.engine.closed)  # kept: what came plays again locally
         self.assertFalse(self.live.in_server_part())
+
+    def test_ai_captions_read_the_server_part_then_the_buffer_after_its_hop(self):
+        # 2.15: from the part's own session, on the live timeline (2.7 said "Not available")
+        sid, part = self.in_part(-300.0)
+        side = self.engine.stream_url(part, 0, side=True)
+        self.assertEqual(self.live.caption_source(), (side, 0, -300.0))
+        self.assertIsNone(self.live.caption_end())
+        self.engine.sessionEnded.emit(part)
+        self.assertEqual(self.live.caption_end(), -288.0)  # what it fetched ends there
+        self.playback.ended.emit()  # VLC read it to its end: the buffer plays (the part kept)
+        self.assertIn(f"/{sid}/side/", self.live.caption_source()[0])
+        self.assertIsNone(self.live.caption_end())
 
     def test_go_live_from_a_part_closes_it(self):
         sid, part = self.in_part(-300.0)
@@ -8584,7 +8595,7 @@ class ArchivePartTests(LiveSessionCase):
         part, url, kwargs = self.engine.opened[-1]
         self.assertNotEqual(part, sid)
         self.assertEqual(url, "http://archive.test/9060.ts")
-        self.assertEqual(kwargs["window"], {"until_s": 940.0, "ahead_s": WINDOW_AHEAD_S})
+        self.assertEqual(kwargs["window"], {"until_s": 940.0, "ahead_s": 60.0})  # (2.15 too)
         self.assertEqual(self.built, [9_100.0])
         own = [Span(n, 30.0 * n, 30.0 * n + 30.0, False) for n in range(3)]
         self.engine.buffer(part, own)
@@ -8637,6 +8648,24 @@ class ArchivePartTests(LiveSessionCase):
         self.assertEqual(url, "http://archive.test/9120.ts")
         self.assertEqual(kwargs["window"]["until_s"], 880.0)
         self.assertTrue(self.live.in_server_part())
+
+    def test_ai_captions_read_each_archive_part_not_while_the_next_is_on_its_way(self):
+        self.archive(9_000.0)
+        part = self.engine.opened[-1][0]
+        self.engine.buffer(part, [Span(0, 0.0, 60.0, False), Span(1, 60.0, 120.0, False)])
+        self.engine.sessionReady.emit(part)
+        side = self.engine.stream_url(part, 0, side=True)
+        self.assertEqual(self.live.caption_source(), (side, 0, -1_000.0))  # placed at 9,000
+        self.engine.sessionEnded.emit(part)
+        self.playback.ended.emit()  # the next address opens
+        self.assertTrue(self.live.in_server_part())
+        self.assertIsNone(self.live.caption_source())  # ("Not available" for that moment)
+        nxt = self.engine.opened[-1][0]
+        self.engine.buffer(nxt, [Span(0, 0.0, 60.0, False)])
+        self.engine.sessionReady.emit(nxt)
+        self.assertEqual(
+            self.live.caption_source(), (self.engine.stream_url(nxt, 0, side=True), 0, -880.0)
+        )
 
     def test_a_seek_past_an_archive_part_builds_its_address(self):
         self.archive(9_100.0)
@@ -8719,7 +8748,8 @@ class SiteRecordingTests(LiveSessionCase):
                 "stop_date": 10_000.0,
                 "late_s": 70.0,
                 "grows": True,
-                "ahead_s": WINDOW_AHEAD_S,
+                "ahead_s": 180.0,  # 2.15: for AI captions (`RECORDING_AHEAD_S`) ...
+                "stop_ahead_s": 60.0,  # ... and a minute from its stop on, as before
                 "reload_s": 30.0,
             },
         )
@@ -8769,6 +8799,67 @@ class SiteRecordingTests(LiveSessionCase):
         self.live.seek_to(-8.0)  # back across the join
         self.assertEqual(len(self.engine.opened), opens)  # locally, from what it brought
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(part, 1))
+        self.assertTrue(self.live.in_server_part())
+
+    def test_a_recording_is_fetched_further_ahead_for_ai_captions(self):
+        # 2.15, the owner: "just fetch further ... so we can get subs". Past what the captions
+        # read ahead (60 s of media past the picture) and their lead at 3x with translation
+        # (3 x (LEAD_S 10 s + 7 s)); from its stop on a minute, as before: less than its join's
+        # room in the buffer. (A provider's window and archive keep a minute: their tests.)
+        self.playing()
+        self.live.seek_to(-1_800.0)
+        window = self.engine.opened[-1][2]["window"]
+        self.assertEqual((window["ahead_s"], window["stop_ahead_s"]), (180.0, 60.0))
+        self.assertGreater(window["ahead_s"], 60.0 + 3 * (10.0 + 7.0))
+        self.assertLess(window["stop_ahead_s"], window["late_s"])
+        self.assertEqual(len(self.engine.opened), 2)  # the buffer's and the part's, no other
+
+    def test_ai_captions_read_the_recording_from_its_own_session_on_the_timeline(self):
+        # 2.15, the owner: "why i cannot use subs in kick streams?" ("Not available" there)
+        sid = self.playing()
+        self.live.seek_to(-1_800.0)
+        part = self.engine.opened[-1][0]
+        self.assertIn(f"/{sid}/side/", self.live.caption_source()[0])  # VLC plays there yet
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=n) for n in range(3)]
+        self.engine.buffer(part, own, hls=True, part_date=8_195.0, part_start=1_795.0)
+        self.engine.sessionReady.emit(part)
+        side = lambda seq: self.engine.stream_url(part, seq, side=True)  # noqa: E731
+        self.assertEqual(self.live.caption_source(), (side(0), 0, -1_805.0))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(21.0)  # at -1,784: its third piece; read from the one before
+        self.assertEqual(self.live.caption_source(), (side(1), 1, -1_795.0))
+        self.assertEqual(self.live.caption_source(-1_790.0), (side(2), 2, -1_785.0))  # `after`
+        self.assertIsNone(self.live.caption_end())  # it fetches on
+
+    def test_ai_captions_go_on_from_the_recording_into_the_buffer(self):
+        sid = self.playing()
+        own = [Span(0, 0.0, 10.0, False, media_seq=359), Span(1, 10.0, 20.0, False, media_seq=360)]
+        part = self.in_recording(-15.0, own, part_date=9_980.0, part_start=3_580.0)
+        self.engine.sessionEnded.emit(part)  # its stream joins the buffer's second 0
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.live.caption_source()[0], self.engine.stream_url(part, 0, side=True))
+        self.assertEqual(self.live.caption_end(), 0.0)  # its side stream ends there
+        self.advance(24.0)  # from -20 (its first piece), past the join at 0
+        self.assertFalse(self.live.in_server_part())
+        url, _seq, start = self.live.caption_source()
+        self.assertIn(f"/{sid}/side/", url)  # the buffer's, as the part stays kept
+        self.assertTrue(start <= self.live.position() < start + 4.0)
+        self.assertIsNone(self.live.caption_end())
+
+    def test_ai_captions_turned_on_in_the_recording_hold_nothing(self):
+        # Their floor holds the picture `LEAD_S` behind live: one far behind already plays on.
+        self.playing()
+        own = [Span(n, 10.0 * n, 10.0 * n + 10.0, False, media_seq=n) for n in range(3)]
+        self.in_recording(-1_800.0, own, part_date=8_195.0, part_start=1_795.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.advance(1.0)
+        plays, before = len(self.playback.plays), self.live.position()
+        self.live.set_caption_floor(10.0)
+        self.advance(2.0)
+        self.assertFalse(self.live.caption_waiting())
+        self.assertNotIn(True, self.playback.holds)
+        self.assertEqual(len(self.playback.plays), plays)  # nothing moved it
+        self.assertAlmostEqual(self.live.position(), before + 2.0, delta=0.3)
         self.assertTrue(self.live.in_server_part())
 
     def test_where_no_buffer_segment_begins_there_vlc_opens_the_buffer_at_its_end(self):

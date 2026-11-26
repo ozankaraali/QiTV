@@ -3132,6 +3132,41 @@ video.m3u8
         self.assertLess(time.monotonic() - began, 5.0)
         self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(4)])
 
+    def test_a_recording_part_is_paced_by_its_stop_ahead_from_its_stop_on(self):
+        # 2.15, AI captions: fetched far ahead (its `ahead_s`) up to its stop, and from there
+        # by `stop_ahead_s`, so its input ends no sooner than before (its join's room).
+        names = [f"r{n}.ts" for n in range(8)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/rec.m3u8"] = (200, {}, self.recording(names))
+        server = self.server(routes)
+        asked = []
+
+        def hold(ahead=None):
+            asked.append((len(requested_segments(server)), ahead))
+            return False
+
+        window = {
+            "from_s": 0.0,
+            "stop_s": 999.0,
+            "stop_date": DAY.timestamp() + 30.0,
+            "late_s": 30.0,
+            "stop_ahead_s": 60.0,
+        }
+        source = open_source(
+            server.url + "/rec.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            live_delay=1.0,
+            window=window,
+            hold=hold,
+        )
+        drain(source)
+        self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(6)])
+        # before r0-r2 its own pace; before r3-r5 (from the stop at 30 s on) a minute's
+        self.assertEqual([ahead for _count, ahead in asked], [None] * 3 + [60.0] * 3)
+        self.assertEqual([count for count, _ahead in asked], list(range(6)))
+
     def test_a_recording_part_waiting_at_its_listings_end_reads_it_again_sooner(self):
         # Brief 2, 8: once all it lists is fetched short of its stop, its listing is read again
         # every 10 s (not Kick's 30 s step), one ask at a time.

@@ -2349,6 +2349,58 @@ class ControllerTimingTests(unittest.TestCase):
         self.assertEqual(self.captions._run, run + 1)
         self.assertFalse(self.captions._restart.isActive())
 
+    PART = "http://127.0.0.1:1/t/p1/side/0.ts"
+
+    def in_part(self, end=None):
+        """2.15: the picture plays a server part far before the buffer: its own session's side
+        stream from -1,805 s on the live timeline; `end`: where the part's input ended."""
+        live = self.window.live_session
+        live.source = (self.PART, 0, -1_805.0)
+        live.in_server_part = lambda: True
+        live.caption_end = lambda: end
+        self.sent.clear()
+        self.at(-1_800.0)  # another session: a run reads it
+        return self.captions._run
+
+    def test_in_a_server_part_the_captions_read_it_on_the_live_timeline(self):
+        # 2.15, the owner: "why i cannot use subs in kick streams?" ("Not available")
+        from services.i18n import translate
+        from ui.captions_texts import NOT_AVAILABLE
+
+        run = self.in_part()
+        self.assertEqual(self.sent[0][:4], ("start", run, self.PART, -1_805.0))
+        self.assertNotEqual(self.captions.status_text(), translate(NOT_AVAILABLE))
+        self.captions._on_caption(run, -1_799.0, -1_797.0, "Merhaba")
+        self.assertEqual(self.at(-1_798.5), "Merhaba")
+
+    def test_a_server_parts_run_read_to_its_end_waits_for_the_buffer(self):
+        run = self.in_part(end=-1_700.0)
+        self.captions._on_caption(run, -1_702.5, -1_700.5, "Son söz")
+        self.captions._on_progress(run, -1_700.2, 0.3)  # read to the part's end
+        self.captions._on_ended(run, "ended")  # its side stream ends there
+        self.assertFalse(self.captions._restart.isActive())  # not again over the same stretch
+        self.sent.clear()
+        self.assertEqual(self.at(-1_702.0), "Son söz")  # its words stay while the part plays
+        self.assertEqual(self.at(-1_701.0), "Son söz")
+        self.assertEqual([m for m in self.sent if m[0] == "start"], [])  # no new run
+        live = self.window.live_session
+        live.source = ("http://127.0.0.1:1/t/s1/side/3.ts", 3, 0.0)  # it joined the buffer
+        live.in_server_part, live.caption_end = (lambda: False), (lambda: None)
+        self.at(0.5)
+        starts = [m[:4] for m in self.sent if m[0] == "start"]
+        self.assertEqual(starts, [("start", run + 1, live.source[0], 0.0)])
+
+    def test_a_server_parts_run_that_stopped_short_reads_on_from_the_picture_there(self):
+        # (its read timed out at what the helper had, the viewer paused): once, as it gets there
+        run = self.in_part()
+        self.captions._on_progress(run, -1_760.0, 0.3)
+        self.captions._on_ended(run, "TimeoutError")
+        self.assertFalse(self.captions._restart.isActive())
+        self.at(-1_790.0)
+        self.assertEqual(self.captions._run, run)  # its words still come
+        self.at(-1_761.5)
+        self.assertEqual(self.captions._run, run + 1)  # from the picture there
+
     def test_off_gives_the_picture_back_and_clears_the_screen(self):
         self.captions._on_caption(self.captions._run, 10.0, 12.0, "x")
         self.at(10.5)

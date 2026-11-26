@@ -1573,12 +1573,15 @@ class _Session:
         until = window.get("until_s") if isinstance(window, dict) else None
         return isinstance(until, (int, float)) and self._timeline.end >= float(until)
 
-    def _hold(self) -> bool:
+    def _hold(self, ahead: float | None = None) -> bool:
         """A server part (2.7) fetches no further while what it holds runs its `ahead_s`
-        past the start of the segment the player reads (its oldest before any read); its
-        ring keeps that segment and what follows (`Ring.protect_from`)."""
+        (2.15: `ahead` when given, a recording part's from its stop on) past the start of the
+        segment the player reads (its oldest before any read); its ring keeps that segment and
+        what follows (`Ring.protect_from`). Only the player's reads count: a side reader's (AI
+        captions') never move `reading`, so they fetch nothing more."""
         window = self._start.get("window")
-        ahead = window.get("ahead_s") if isinstance(window, dict) else None
+        if ahead is None:
+            ahead = window.get("ahead_s") if isinstance(window, dict) else None
         if not isinstance(ahead, (int, float)):
             return False
         timeline = self._timeline
@@ -1588,12 +1591,12 @@ class _Session:
         reading = self._helper.server.reading(self.sid)
         if self._ring is not None:  # what the player reads and what lies ahead stay
             self._ring.protect_from(reading if reading is not None else spans[0].seq)
-        if reading is None:
-            start = spans[0].start
-        else:
-            start = next((span.start for span in spans if span.seq == reading), None)
-            if start is None:  # the open segment (at the edge) or one evicted: fetch on
+        start = spans[0].start
+        if reading is not None:
+            found = next((span.start for span in spans if span.seq == reading), None)
+            if found is None:  # the open segment (at the edge) or one evicted: fetch on
                 return False
+            start = found
         return timeline.end - start > float(ahead)
 
     def _follow(self, source: Source) -> None:

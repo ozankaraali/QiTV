@@ -460,6 +460,14 @@ _CAPTION_BACK_S = 3.0  # time-shifted this near their floor when they come on: l
 WINDOW_MIN_S = 300.0
 WINDOW_BAR_S = 30 * 60.0
 WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
+# 2.15, AI captions (the owner: "it is decided video, just fetch further"): a site's recording,
+# which has no stream limit, is fetched this far ahead, on its one connection, so the captions'
+# side reader (at most 60 s of media past the picture, services.captions.worker) always finds
+# its sound written, even at 3x (3 x (a 10 s lead + 7 s for translation) = 51 s) with two
+# minutes to spare; at 8 Mbit/s that is about 172 MiB, within the default 256 MiB a stream
+# holds in memory. From its stop on it keeps `WINDOW_AHEAD_S`: its join's room in the buffer
+# (`_JOIN_INSIDE_S`, 70 s) stays more than what it fetches ahead there.
+RECORDING_AHEAD_S = 180.0
 _ARCHIVE_JOIN_S = 2.0  # an archive part ending this near the buffer's start hops into it
 _PART_SLACK_S = 10.0  # a point this far before a part's start is still played from it
 _PART_STEP_S = 6.0  # a part that broke off having brought less than this has nothing more
@@ -1905,14 +1913,23 @@ class LiveSession(QObject):
         the picture is was read from mid-word, "O beslediği takdirde" lost; from the segment
         before, it is read whole and shows for what is left of it), that segment's seq and its
         start on the timeline; with `after`, from the first segment that starts there or later
-        (past a jump the reader stopped at). None when no pipeline stream plays from the ring (a
-        direct play, the channel's server window or a provider archive, or nothing yet), or no
-        such segment."""
+        (past a jump the reader stopped at). 2.15 (the owner: "why i cannot use subs in kick
+        streams?"): while the picture plays a server part (a site's recording, the channel's
+        server window, a provider archive), from the part's own helper session, its segments
+        placed on the timeline (`ServerPart.offset`): the side reader reads only what the part
+        fetched, never a second connection. None when no pipeline stream plays (a direct play,
+        or nothing yet), while a part is on its way, or with no such segment."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return None
-        if self._part is not None or self._in_part or self._archive is not None:
-            return None
-        spans = self._engine.spans(self._sid)
+        part = self._part if self._part_playing else None
+        if part is not None:
+            if part.offset is None:
+                return None
+            sid, spans = part.sid, part.spans(self._engine.spans(part.sid))
+        elif self._in_part:
+            return None  # a part on its way (the next archive address too)
+        else:
+            sid, spans = self._sid, self._engine.spans(self._sid)
         if not spans:
             return None
         if after is not None:
@@ -1926,10 +1943,21 @@ class LiveSession(QObject):
                 (i for i in range(len(spans) - 1, -1, -1) if spans[i].start <= position), 0
             )
             span = spans[max(0, holds - 1)]
-        url = self._engine.stream_url(self._sid, span.seq, side=True)
+        url = self._engine.stream_url(sid, span.seq, side=True)
         if not url:
             return None
         return url, int(span.seq), float(span.start)
+
+    def caption_end(self) -> Optional[float]:
+        """2.15: where what AI captions read ends for good on the timeline: the end of the
+        server part the picture plays once its input ended (its side stream ends there; the
+        next part or the buffer is read next, `caption_source`); None otherwise."""
+        part = self._part if self._part_playing else None
+        if self._phase is not _Phase.PIPELINE or part is None or not part.ended:
+            return None
+        if part.offset is None:
+            return None
+        return part.offset + _number(self._engine.snapshot(part.sid).get("end"))
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -4837,7 +4865,8 @@ class LiveSession(QObject):
             "stop_date": stop,
             "late_s": _JOIN_INSIDE_S,
             "grows": True,
-            "ahead_s": WINDOW_AHEAD_S,
+            "ahead_s": RECORDING_AHEAD_S,
+            "stop_ahead_s": WINDOW_AHEAD_S,
         }
         if route.steps:
             window["reload_s"] = RECORDING_RELOAD_S

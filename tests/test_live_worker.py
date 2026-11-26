@@ -1800,6 +1800,45 @@ class ServerPartPacingTests(unittest.TestCase):
         time.sleep(1.5)
         self.assertGreater(len(fetched()), len(before))
 
+    def test_a_side_reader_of_a_server_part_fetches_nothing_more(self):
+        # 2.15: AI captions read a part through its side stream. Only the player's reads pace
+        # its fetching (the server's own `reading`): a side reader read dry asks nothing
+        # upstream; the player reading on does.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(10))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(10)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        server = helper.helper.server
+        window = {"back_s": 10.0, "ahead_s": 3.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        time.sleep(1.5)
+        asked = len(upstream.requests)
+        self.assertLess(asked, 1 + 10)  # held about 3 s ahead
+        ring = helper.helper._sessions["p"]._ring
+        side = urlopen(server.stream_url("p", ring.oldest_seq, side=True), timeout=1)
+        self.addCleanup(side.close)
+        read = 0
+        try:
+            while chunk := side.read1(64 * 1024):
+                read += len(chunk)
+        except OSError:  # (its timeout) it read all the part holds, and waits for more
+            pass
+        self.assertGreater(read, 0)
+        time.sleep(1.0)
+        self.assertEqual(len(upstream.requests), asked)  # nothing more asked upstream
+        self.assertIsNone(server.reading("p"))  # (the player's alone)
+        player = urlopen(server.stream_url("p", ring.newest_seq), timeout=5)
+        self.addCleanup(player.close)
+        self.assertTrue(wait_until(lambda: len(upstream.requests) > asked, 5000))
+
 
 class ServerPartProtectionTests(unittest.TestCase):
     def test_a_server_part_protects_what_the_player_reads(self):
