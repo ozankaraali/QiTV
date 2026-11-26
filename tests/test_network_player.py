@@ -1045,8 +1045,16 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.live.play_pipeline()
         self.plays_now()
         starts = len(self.starts())
-        self.live.failed.emit(message)
+        self.buffer_fails(message)
         return starts
+
+    def buffer_fails(self, message=STREAM_REFUSED):
+        """The buffer fails; the stop that follows lets its upstream go at once, as LiveSession
+        says once it closed (not after the release's cap)."""
+        stops = len(self.live.named("stop"))
+        self.live.failed.emit(message)
+        if len(self.live.named("stop")) > stops:
+            self.live.released.emit()
 
     def test_a_site_link_whose_buffer_fails_asks_the_site_again(self):
         self.answers = [MASTER, MASTER_FRESH]
@@ -1103,7 +1111,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
             self.live.play_pipeline()
             self.plays_now()
             began = time.monotonic()
-            self.live.failed.emit(STREAM_REFUSED)  # again, at once
+            self.buffer_fails()  # again, at once
             self.assertTrue(wait_until(lambda: self.pill_text() is not None))
             self.assertTrue(
                 wait_until(lambda: len(self.starts()) == starts + count, timeout_ms=5000)
@@ -1139,7 +1147,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.plays_now()
         pause(300)  # HEALTHY_S since its first picture
         self.plays_now()  # its hold let go: "playing" again
-        self.live.failed.emit(STREAM_REFUSED)
+        self.buffer_fails()
         self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 2))
         self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
         self.assertEqual(len(self.asked), 3)
@@ -1156,7 +1164,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.plays_now()
         starts = len(self.starts())
         self.live.retrying.emit(5.0)  # the helper waits for its stream
-        self.live.failed.emit(STREAM_REFUSED)  # its one try met the token's death
+        self.buffer_fails()  # its one try met the token's death
         self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
         self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
         self.assertEqual(len(self.asked), 2)

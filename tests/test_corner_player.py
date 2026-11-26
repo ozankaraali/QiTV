@@ -11,7 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
-from tests.http_fixtures import LocalSource
+from tests.http_fixtures import LocalSource, live_body
 from tests.test_tv_window import INSTANCE, MouseHeard, WindowCase
 from tests.ts_fixtures import make_stream
 from ui.keymap import Action
@@ -134,17 +134,8 @@ class CornerPlayerTests(WindowCase):
         cls.payload = make_stream(60)  # 60 s of H.264 and AAC in MPEG-TS
 
     def setUp(self):
-        stop, payload = threading.Event(), self.payload
-
-        def paced(request):  # a live-looking stream, a few times real time
-            try:
-                for offset in range(0, len(payload), 188 * 20):
-                    if stop.wait(0.02):
-                        return
-                    request.wfile.write(payload[offset : offset + 188 * 20])
-            except OSError:
-                pass
-
+        stop = threading.Event()
+        paced = live_body(self.payload, stop)  # a live channel's: its backlog, then live
         route = lambda _request, _count: (200, {"Content-Type": "video/mp2t"}, paced)  # noqa: E731
         self.source = LocalSource({"/live/1.ts": route, "/live/2.ts": route})
         self.addCleanup(self.source.close)  # after the window closed (cleanups run last first)

@@ -195,6 +195,10 @@ _HELD_RELOAD_S = 30.0
 # out (measured: such a group answered every request for up to 14 s), at least this.
 _OTHER_COPY_S = 4.0
 _OTHER_RELOAD_S = 1.0
+# A live playlist is read again this part of its target duration after its last reload began,
+# this long at least.
+_RELOAD_PART = 0.5
+_RELOAD_FLOOR_S = 1.0
 _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 # Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
@@ -2521,7 +2525,7 @@ class HlsSource:
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
-            interval = max(1.0, float(playlist.target_duration or 0) / 2)
+            interval = max(_RELOAD_FLOOR_S, _RELOAD_PART * float(playlist.target_duration or 0))
             if self._prefetching:
                 interval = _PREFETCH_RELOAD_S
             elif self._recording and self._grows and self._reload_s:
