@@ -92,13 +92,16 @@ print(json.dumps({"shown": shown.decode(), "answer": answer.decode(errors="repla
 # settings folder (argv[1]) with its file (argv[2]). One that listens serves until argv[3] files
 # were handed to it (RACE_BOUND_S at most), as a starting QiTV's event loop would. Then one JSON
 # line: whether it handed over (and how long its claim took), whether it listened, and the
-# files handed to it.
+# files handed to it. argv[5], when given, is its START_WAIT_MS (the product's 20 s otherwise).
 RACE = r"""
 import json, sys, time
 from PySide6.QtCore import QCoreApplication, QTimer
+from services import single_instance
 from services.single_instance import claim
 app = QCoreApplication([])
 folder, path, expect, bound = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+if len(sys.argv) > 5:
+    single_instance.START_WAIT_MS = int(sys.argv[5])
 print("ready", flush=True)
 moment = float(sys.stdin.readline())
 time.sleep(max(0.0, moment - time.time() - 0.02))
@@ -122,7 +125,10 @@ app.exec()
 server.close()
 print(json.dumps({"handed_over": False, "listening": listening, "opened": opened}), flush=True)
 """
-LATE_S = 22.0  # the late holder answers this long after the starts claimed (> START_WAIT_MS)
+# The late holder's starts wait START_WAIT_MS this long (the product's 20 s, shortened in
+# their processes), and it answers LATE_S after they claimed: 2 s past it, as with 20 s and 22 s.
+LATE_START_WAIT_MS = 3000
+LATE_S = LATE_START_WAIT_MS / 1000 + 2.0
 RACE_STARTS = 6
 RACE_BOUND_S = 60.0  # a listening start ends sooner once every other start's file came
 
@@ -331,14 +337,16 @@ class ClaimTests(unittest.TestCase):
         self.listening(claim(self.folder))
         self.assertLess(time.monotonic() - started, 1.5)  # not reached: not waited for
 
-    def race(self, files, expect, meanwhile=None):
+    def race(self, files, expect, meanwhile=None, start_wait_ms=None):
         """One start per file, released at one instant once every one has said it is ready
         (however long a loaded machine takes to import Qt); `meanwhile(moment)` runs while they
-        claim; what each said."""
+        claim; what each said. `start_wait_ms`: the starts' START_WAIT_MS."""
         env = dict(os.environ, PYTHONPATH=str(REPO), QT_QPA_PLATFORM="offscreen")
+        extra = [] if start_wait_ms is None else [str(start_wait_ms)]
         starts = [
             subprocess.Popen(
-                [sys.executable, "-c", RACE, self.folder, path, str(expect), str(RACE_BOUND_S)],
+                [sys.executable, "-c", RACE, self.folder, path, str(expect), str(RACE_BOUND_S)]
+                + extra,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -468,6 +476,7 @@ class ClaimTests(unittest.TestCase):
         released = holder.stdout.readline().split()
         self.assertEqual(released[0], "released")
         self.assertGreaterEqual(listened_at, float(released[1]))
+        holder.stdin.close()  # done with it: it quits now, not 3 s on
         self.assertEqual(holder.wait(10), 0)
         server.close()
         self.assertLockFree()
@@ -525,10 +534,11 @@ class ClaimTests(unittest.TestCase):
             holder.stdin.flush()
 
         files = [os.path.join(self.folder, f"Geç {i}.mkv") for i in range(3)]
-        said = self.race(files, expect=0, meanwhile=serve_late)  # one that listened would show
+        # one that listened would show
+        said = self.race(files, 0, meanwhile=serve_late, start_wait_ms=LATE_START_WAIT_MS)
         self.assertEqual([s["handed_over"] for s in said], [True] * 3, said)
         for s in said:  # each waited past START_WAIT_MS: before Ruling 32 it took over then
-            self.assertGreater(s["claim_s"], single_instance.START_WAIT_MS / 1000, said)
+            self.assertGreater(s["claim_s"], LATE_START_WAIT_MS / 1000, said)
         got = sorted(json.loads(holder.stdout.readline().split(" ", 1)[1]) for _ in files)
         self.assertEqual(got, sorted(files))
         self.stop_holder(holder)
@@ -626,6 +636,7 @@ class ClaimTests(unittest.TestCase):
                     self.assertEqual(released[0], "released")
                     self.assertGreaterEqual(listened_at, float(released[1]))
                     self.assertGreaterEqual(time.monotonic() - started, 3.5)
+                    holder.stdin.close()  # done with it: it quits now, not 3 s on
                 self.assertEqual(holder.wait(10), 0)
                 other = single_instance._InstanceLock(self.folder)
                 self.assertIs(other.acquire(), single_instance._Lock.HELD)  # the start's now
