@@ -296,12 +296,15 @@ def pcr_of(packet):
     return (b[0] << 25) | (b[1] << 17) | (b[2] << 9) | (b[3] << 1) | (b[4] >> 7)
 
 
-def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02):
-    """A close-delimited body that streams at a few times real time until the client hangs up."""
+def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02, backlog=0):
+    """A close-delimited body that streams at a few times real time until the client hangs up
+    (its first `backlog` bytes at once)."""
 
     def body(request):
         try:
-            for offset in range(0, len(payload), block):
+            if backlog:
+                request.wfile.write(payload[:backlog])
+            for offset in range(backlog, len(payload), block):
                 if stop.wait(interval):
                     return
                 request.wfile.write(payload[offset : offset + block])
@@ -321,6 +324,8 @@ def paced_route(payload, stop, hung_up, **pace):
 # 1.5 times real time, as a live channel after its backlog. At the default pace (6 times) a
 # tune's not-live guard (2.8.11) holds the bytes its longest, 4 s, before the session is ready.
 LIVE_PACE = {"block": 188 * 5}
+# ... and as a live channel's connection brings it: its backlog (some 8 s) at once first.
+BACKLOG_PACE = {**LIVE_PACE, "backlog": 188 * 1400}
 
 
 class StalledUpstream:
@@ -1097,7 +1102,8 @@ class LiveWorkerTests(unittest.TestCase):
         # A live input that turns out scrambled: its upstream is released at the error.
         hung_up = threading.Event()
         live = make_stream(30, scrambled=True)
-        routes["/user/secret/scrambled-live"] = paced_route(live, self.stop, hung_up)
+        scrambled = paced_route(live, self.stop, hung_up, **BACKLOG_PACE)
+        routes["/user/secret/scrambled-live"] = scrambled
         source = self.source(routes)
         helper = self.helper()
         for name in [*bodies, "scrambled-live"]:
@@ -2057,7 +2063,8 @@ class ParkResumeTests(unittest.TestCase):
     def test_park_closes_the_upstream_and_keeps_serving(self):
         stop, hung_up = threading.Event(), threading.Event()
         self.addCleanup(stop.set)
-        upstream = self.source({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        route = paced_route(make_stream(60), stop, hung_up, **BACKLOG_PACE)
+        upstream = self.source({SECRET_PATH: route})
         helper = InProcessHelper(self)
         helper.parent.send(("open", "p", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
         helper.wait_for(lambda m: m == ("ready", "p"))
@@ -2214,7 +2221,8 @@ class ParkResumeTests(unittest.TestCase):
         # Review I2: another player takes the ring back before "parked" came.
         stop, hung_up = threading.Event(), threading.Event()
         self.addCleanup(stop.set)
-        upstream = self.source({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        route = paced_route(make_stream(60), stop, hung_up, **BACKLOG_PACE)
+        upstream = self.source({SECRET_PATH: route})
         good = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
         helper = InProcessHelper(self)
         helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))

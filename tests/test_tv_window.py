@@ -62,7 +62,7 @@ from tests.fixtures.local_provider import (
     write_local_provider,
 )
 from tests.fixtures.local_xtream import XtreamFixture
-from tests.http_fixtures import LocalSource
+from tests.http_fixtures import LocalSource, live_body
 from tests.process_fixtures import still_running, terminate
 from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
@@ -1977,17 +1977,8 @@ class LivePipelineWindowTests(WindowCase):
         cls.payload = make_stream(60)  # 60 s of H.264 and AAC in MPEG-TS, about 2 MB
 
     def setUp(self):
-        stop, payload = threading.Event(), self.payload
-
-        def paced(request):  # a live-looking stream, a few times real time
-            try:
-                for offset in range(0, len(payload), 188 * 20):
-                    if stop.wait(0.02):
-                        return
-                    request.wfile.write(payload[offset : offset + 188 * 20])
-            except OSError:
-                pass
-
+        stop = threading.Event()
+        paced = live_body(self.payload, stop)  # a live channel's: its backlog, then live
         route = lambda _request, _count: (200, {"Content-Type": "video/mp2t"}, paced)  # noqa: E731
         self.source = LocalSource({"/live/1.ts": route, "/live/2.ts": route})
         self.addCleanup(self.source.close)  # after the window closed (cleanups run last first)

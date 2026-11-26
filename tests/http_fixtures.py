@@ -26,8 +26,16 @@ __all__ = [
     "LoopbackHTTPServer",
     "ThreadingLoopbackHTTPServer",
     "leaf",
+    "live_body",
     "tls_server_context",
 ]
+
+# make_stream's media comes at about 32 kB a second. A live channel's connection brings its
+# backlog at once and then about real time; the helper's not-live guard (2.8.11) holds each
+# connection's bytes until their arrival settles (at most twice real time over a second), 4 s
+# at most, so a body faster than that throughout is held the whole 4 s at every connection.
+LIVE_BACKLOG = 188 * 1400  # some 8 s of make_stream's media
+LIVE_BLOCK = 188 * 5  # every 20 ms: some 1.5 times real time
 
 
 class _QuietServer(ThreadingLoopbackHTTPServer):
@@ -85,6 +93,25 @@ def leaf(*segments, ended=True, extra=""):
     if ended:
         text += "#EXT-X-ENDLIST\n"
     return text.encode()
+
+
+def live_body(payload, stop, hung_up=None, backlog=LIVE_BACKLOG):
+    """A close-delimited body as a live channel sends it: `backlog` bytes of `payload` at
+    once, then the rest at some 1.5 times real time, until `stop` is set or the client hangs
+    up (`hung_up` is set then)."""
+
+    def body(request):
+        try:
+            request.wfile.write(payload[:backlog])
+            for offset in range(backlog, len(payload), LIVE_BLOCK):
+                if stop.wait(0.02):
+                    return
+                request.wfile.write(payload[offset : offset + LIVE_BLOCK])
+        except OSError:
+            if hung_up is not None:
+                hung_up.set()
+
+    return body
 
 
 class LocalSource:
