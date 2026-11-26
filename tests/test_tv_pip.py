@@ -27,8 +27,8 @@ from services.live.live_session import (
 )
 from services.live.refusals import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
-from services.navigation import RECENT_GROUP
-from services.network_streams import NetworkStreams, stream_id
+from services.navigation import LINK_LAYER, RECENT_GROUP, NavNode
+from services.network_streams import FILM, LIVE, NetworkStreams, stream_id
 from services.provider_ids import NETWORK_PROVIDER, with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import STB_USER_AGENT, PlayKind
@@ -1797,6 +1797,62 @@ class LinkOwnerPipTests(PipCase):
         self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
         self.assertFalse(small.live.named("start")[0][1].get("once", False))
         self.assertEqual(len(self.catalog.links), links)  # its address is known: none asked
+
+    def small_as_its_accounts(self, links):
+        small = self.sessions.other()
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 1))
+        self.assertEqual(small.live.named("start")[0][0], self.URL)
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
+        self.assertEqual(self.budget.holders(NETWORK_PROVIDER), [])
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_a_network_streams_rows_menu_opens_its_link_small_as_its_accounts(self):
+        # The row's menu (Network streams', or the find's: keyed by its id) is the kept
+        # link's as it plays: its address, and its account's stream; a film's has no
+        # picture-in-picture, and a link no longer kept has no menu.
+        self.start_large(0)
+        live = self.player.store.keep(self.URL, "Seven", LIVE)
+        film = self.player.store.keep("https://vod.example/films/lecture.mkv", "Lecture", FILM)
+
+        def menu_of(key):
+            with shown_menus() as popup:
+                self.drawer.contextRequested.emit(NavNode(LINK_LAYER, key, "Row"), QPoint(4, 5))
+            shown = menus_of(popup)
+            return shown[0][0] if shown else None
+
+        players = ["Play in VLC", "Play in MPV", "Copy stream link"]
+        self.assertEqual(menu_of(film.id).texts(), players)
+        self.assertIsNone(menu_of(stream_id("https://cdn.example/gone.m3u8")))
+        menu = menu_of(live.id)
+        self.assertEqual(menu.texts(), [OPEN_PIP_TEXT, *players])
+        links = len(self.catalog.links)
+        menu.entry(OPEN_PIP_TEXT).trigger()
+        self.small_as_its_accounts(links)
+
+    def test_ctrl_p_on_a_links_row_opens_it_small_as_its_accounts_never_a_film(self):
+        self.start_large(0)
+        live = self.player.store.keep(self.URL, "Seven", LIVE)
+        film_url = "https://vod.example/films/lecture.mkv"
+        film = self.player.store.keep(film_url, "Lecture", FILM)
+        # The find lists the film under a live section: its plain dict (no address) is no
+        # channel to open small (it would play live).
+        self.nav.reset_to("live", "10")
+        self.drawer.found = True
+        found = {"id": film.id, "name": "Lecture", "_provider": NETWORK_PROVIDER}
+        self.drawer.highlight = NavNode("item", film.id, "Lecture", found)
+        self.drawer.visible = True
+        self.controller.handle(Action.PIP)
+        pause(50)
+        self.assertEqual(self.sessions.other().live.named("start"), [])
+        self.assertEqual(self.pip_session.plays, [])
+        # Network streams' row of the account's live link: small, as its account's stream.
+        self.drawer.found = False
+        self.drawer.highlight = NavNode(LINK_LAYER, live.id, "Seven")
+        self.drawer.visible = True
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PIP)
+        self.assertEqual(self.drawer.named("close_drawer")[-1], ())
+        self.small_as_its_accounts(links)
 
 
 class SitePipTests(PipCase):

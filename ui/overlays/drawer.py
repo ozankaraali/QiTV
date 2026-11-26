@@ -12,8 +12,10 @@ sections, which the Library shows (`libraryRequested`). Highlighting them previe
 Network streams (plan 4), after the providers among the sources, lists the links that played:
 each row its name, then what it is ("Live", "Film · stopped at 41:12") or, in the warning
 colour, why it did not play last time. A link chosen plays (`playRequested`, as a channel).
-The find lists them by their names too; one found plays as it was kept (`channelFound`), and
-is no channel otherwise: it never drags out onto a tile and has no channel's menu.
+The find lists them by their names too; one found plays as it was kept (`channelFound`). Either
+row's menu is asked for as a link's row keyed by its id (`contextRequested`), and a live link's
+row drags out onto a tile as the link plays (`set_link_item`: its address, whose stream it is);
+a film's never does. The find's plain dict (no address, no owner) is never the channel.
 
 The left column's top row starts with ‹ (a layer up, as ← on the left column; hidden on the
 sources), then names where the left column is, each a link: a name shows its node's children
@@ -334,7 +336,7 @@ def _has_context(node: NavNode) -> bool:
 def _found_link(node: NavNode) -> bool:
     """Whether a row of the find is a link of Network streams (its id names it there, not its
     account: as a channel, a tile or a menu would book it under no provider and play a film
-    live)."""
+    live; Drawer.kept_link is the link as it plays)."""
     payload = node.payload
     return isinstance(payload, dict) and provider_of(payload) == NETWORK_PROVIDER
 
@@ -871,6 +873,7 @@ class Drawer(Overlay):
         self._laid_out_for: tuple[int, int] | None = None  # the host size _relayout last fitted
         self._hover: str | None = None  # the header button under the pointer
         self._drag_enabled: Callable[[], bool] = lambda: False  # set_drag_enabled
+        self._link_item: Callable[[str], tuple[dict, str] | None] = lambda key: None
         self._drag_from: tuple[str, int, QPoint] | None = None  # a press on a row (global)
         self._dragging: NavNode | None = None  # the channel being dragged out
         # A row's click that closed the list (a channel plays): see _on_row_clicked.
@@ -927,6 +930,31 @@ class Drawer(Overlay):
     def dragging(self) -> NavNode | None:
         """The channel being dragged out of the list, else None."""
         return self._dragging
+
+    def set_link_item(self, item_of: Callable[[str], tuple[dict, str] | None]) -> None:
+        """`item_of(id)`: the link of Network streams kept under `id` as it plays (its item and
+        its kind, LIVE or FILM), None when none is kept so."""
+        self._link_item = item_of
+
+    def link_key(self, node: NavNode) -> str | None:
+        """The id of the link of Network streams `node` is a row of (its list's, or the
+        find's); None for any other row (⟲ Recent's links are channels with their address)."""
+        if node.layer == LINK_LAYER:
+            return node.key
+        if self.finding() and _found_link(node):
+            return str(node.payload.get("id") or "")
+        return None
+
+    def kept_link(self, node: NavNode) -> tuple[NavNode, str] | None:
+        """The link `node` is a row of, as it plays: a channel's row of its item (its address,
+        whose stream it is now) and its kind; None for a row that is no link's, or a link no
+        longer kept."""
+        key = self.link_key(node)
+        kept = self._link_item(key) if key is not None else None
+        if kept is None:
+            return None
+        item, kind = kept
+        return NavNode("item", item_key(item), item_title(item), item), kind
 
     def close_drawer(self) -> None:
         self._flush_preview()
@@ -1327,25 +1355,34 @@ class Drawer(Overlay):
         """A right-click at `pos` (viewport coordinates) of a column's list."""
         col = self._columns[side]
         row = col.view.indexAt(pos).row()
-        if not 0 <= row < len(col.nodes) or not _has_context(col.nodes[row]):
-            return
-        if self.finding() and _found_link(col.nodes[row]):
-            return  # a found link plays as it was kept (Enter, a click): no channel's menu
-        self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
+        node = self._menu_node(col.nodes[row]) if 0 <= row < len(col.nodes) else None
+        if node is not None:
+            self.contextRequested.emit(node, col.view.viewport().mapToGlobal(pos))
 
     def context_key(self) -> bool:
         """The menu key or Shift+F10 (2.13.1): the highlighted row's menu, as its right-click
         asks for it, beside the row (its global rect). False: the row has none."""
         col = self._columns[self.focus_side]
         node = self.highlighted()
-        if node is None or not _has_context(node) or (self.finding() and _found_link(node)):
+        menu = self._menu_node(node) if node is not None else None
+        if node is None or menu is None:
             return False
         view = col.view
         rect = view.visualRect(col.model.index(col.rows[node], 0))
         self.contextRequested.emit(
-            node, QRect(view.viewport().mapToGlobal(rect.topLeft()), rect.size())
+            menu, QRect(view.viewport().mapToGlobal(rect.topLeft()), rect.size())
         )
         return True
+
+    def _menu_node(self, node: NavNode) -> NavNode | None:
+        """What `node`'s menu is asked for: a link of Network streams' row (its list's, or the
+        find's) as a link's row keyed by its id while it is kept (its menu is the link's as it
+        plays, never the find's plain dict's), any other row with a menu as it is; None: the
+        row has none."""
+        key = self.link_key(node)
+        if key is None:
+            return node if _has_context(node) else None
+        return NavNode(LINK_LAYER, key, node.title) if self.kept_link(node) is not None else None
 
     def _on_nav_changed(self) -> None:
         if self.isVisible():
@@ -1818,12 +1855,15 @@ class Drawer(Overlay):
             return None  # still over the list: a click that moved a little
         nodes = self._columns[side].nodes
         node = nodes[row] if 0 <= row < len(nodes) else None
+        if node is not None and self.link_key(node) is not None:
+            kept = self.kept_link(node)  # a link of Network streams: as it plays, live only
+            if kept is not None and kept[1] != FILM:
+                return kept[0]
+            self._drag_from = None  # a film never plays live (nor a link no longer kept)
+            return None
         live = self.finding() or (node is not None and self._nav.section_of(node) == "live")
         if node is None or node.layer != "item" or not isinstance(node.payload, dict) or not live:
             self._drag_from = None  # not a channel's row: a plain press and move
-            return None
-        if self.finding() and _found_link(node):
-            self._drag_from = None  # a found link is no channel for a tile
             return None
         return node
 
