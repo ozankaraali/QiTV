@@ -8971,6 +8971,46 @@ class SiteRecordingTests(LiveSessionCase):
         self.assertFalse(self.live.in_server_part())
         self.assertEqual(self.chosen(), (1.5, 1.5, "catching_up"))
 
+    def test_a_chosen_speed_holds_while_a_seek_replaces_the_recordings_part(self):
+        # The owner's log (2026-11-26 22:32:59): at 1.5x in the recording, a seek outside the
+        # part (still before the buffer) opens another; 1.8 s later "VLC's rate is now 1x",
+        # before it played. A click on the bar and a step back take this path alike.
+        transport = Transport(None, idle_ms=3000)
+        self.addCleanup(transport.deleteLater)
+        for name, seek in (
+            ("a click on the bar", lambda: self.live.seek_to(-1_880.0)),
+            ("a step back", lambda: self.live.seek_relative(-30.0)),
+        ):
+            with self.subTest(name):
+                self.live = self.make()
+                self.timelines.clear()
+                self.playing()
+                own = [Span(n, 2.0 * n, 2.0 * n + 2.0, False, media_seq=n) for n in range(60)]
+                old = self.in_recording(-1_800.0, own, part_date=8_195.0, part_start=1_795.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.advance(1.0)
+                self.live.set_speed(1.5)
+                self.live.set_caption_floor(10.0)  # (AI captions were on)
+                self.advance(5.0)
+                shown = len(self.timelines)
+                seek()
+                new = self.engine.opened[-1][0]
+                self.assertNotEqual(new, old)  # replaced, not a seek inside it
+                self.engine.answer()  # the old part's connection closed
+                self.advance(2.0)  # on its way
+                self.assertTrue(self.live.in_server_part())
+                self.assertIsNone(self.live.caption_source())
+                self.engine.buffer(new, own, hls=True, part_date=8_110.0, part_start=1_710.0)
+                self.engine.sessionReady.emit(new)  # it plays
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.advance(2.0)
+                self.assertIn(f"/{new}/stream/", self.playback.plays[-1][0])
+                self.assertEqual(self.chosen(), (1.5, 1.5, "catching_up"))
+                self.assertNotIn(1.0, self.playback.rates)
+                for state in self.timelines[shown:]:  # the chip: 1.5x throughout
+                    transport.update_timeline(state, [])
+                    self.assertEqual(transport._speed, 1.5)
+
     def test_where_no_buffer_segment_begins_there_vlc_opens_the_buffer_at_its_end(self):
         spans = [Span(n, 6.0 * n, 6.0 * n + 6.0, False, media_seq=500 + n) for n in range(30)]
         sid = self.playing(spans=spans)
