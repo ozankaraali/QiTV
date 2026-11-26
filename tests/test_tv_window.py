@@ -78,6 +78,7 @@ from ui.tv_menus import ISSUES_URL
 from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
+    CLOSING_NOTICE_AFTER,
     CLOSING_TEXT,
     SAVE_FAILED_TEXT,
     WATCH_SAVE_DELAY_MS,
@@ -172,6 +173,13 @@ class WindowCase(unittest.TestCase):
         self.image_manager = ImageManager(self.config, 10 * 1024 * 1024)
         self.epg_manager = EpgManager(self.config, self.provider_manager)
         self.window = self.make_window()
+        if self.vlc_instance is None:
+            # Without libVLC the close's steps wait for nothing but the event loop's next
+            # turn: CLOSE_RETRY_MS (50) apart in the app, 5 ms here, and its notice comes
+            # after ten times as many (half a second still).
+            self.window.close_retry.setInterval(5)
+            after = CLOSING_NOTICE_AFTER * CLOSE_RETRY_MS // 5
+            self.enterContext(mock.patch("ui.tv_window.CLOSING_NOTICE_AFTER", after))
         self.toasts: list[tuple[str, str]] = []
         toast = self.window.overlays.toast
         show_message = toast.show_message
@@ -182,6 +190,11 @@ class WindowCase(unittest.TestCase):
 
         toast.show_message = spy
         self.addCleanup(self.close_window)
+
+    def app_close_steps(self) -> None:
+        """The close's steps at the app's pace (a test of its retries and its notice)."""
+        self.window.close_retry.setInterval(CLOSE_RETRY_MS)
+        self.enterContext(mock.patch("ui.tv_window.CLOSING_NOTICE_AFTER", CLOSING_NOTICE_AFTER))
 
     def prepare_config(self) -> None:
         """Change the configuration before the window is built."""
@@ -1155,6 +1168,7 @@ class TVWindowTests(WindowCase):
         return seen
 
     def test_closing_notice_stays_visible_for_the_whole_wait(self):
+        self.app_close_steps()
         self.show()
         self.wait_for_drawer()
         toast = self.window.overlays.toast
@@ -1171,6 +1185,7 @@ class TVWindowTests(WindowCase):
             self.assertTrue(wait_until(lambda: not self.window.isVisible()))
 
     def test_closing_notice_is_shown_again_only_after_it_hid(self):
+        self.app_close_steps()
         self.show()
         self.wait_for_drawer()
         shown_over = self.visible_when_shown()
@@ -1187,6 +1202,7 @@ class TVWindowTests(WindowCase):
 
     def test_repeated_close_keeps_a_single_retry_timer(self):
         # Quit pressed again and again while a worker is pending must not multiply retries.
+        self.app_close_steps()
         self.show()
         self.wait_for_drawer()
         checks, waiting = [], [True]
