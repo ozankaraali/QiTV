@@ -460,6 +460,19 @@ _CAPTION_BACK_S = 3.0  # time-shifted this near their floor when they come on: l
 WINDOW_MIN_S = 300.0
 WINDOW_BAR_S = 30 * 60.0
 WINDOW_AHEAD_S = 60.0  # a server part fetches this far ahead of the player
+# 2.15, AI captions (the owner: "it is decided video, just fetch further"): a site's recording,
+# which has no stream limit, is fetched this far ahead, on its one connection, so the captions'
+# side reader (at most 60 s of media past the picture, services.captions.worker) always finds
+# its sound written, even at 3x (3 x (a 10 s lead + 7 s for translation) = 51 s) with two
+# minutes to spare. In memory no more than `_AHEAD_SHARE` of the ring at the stream's bitrate
+# (the buffer's own, else `_ASSUMED_BYTES_S`), never under `WINDOW_AHEAD_S`: what a part holds
+# ahead is never evicted, and the rest keeps what plays behind the picture (review: 180 s at 6
+# Mbit/s is over a 128 MiB ring). From its stop on it keeps `WINDOW_AHEAD_S`: its join's room
+# in the buffer (`_JOIN_INSIDE_S`, 70 s) stays more than what it fetches ahead there.
+RECORDING_AHEAD_S = 180.0
+_AHEAD_SHARE = 0.6
+_ASSUMED_BYTES_S = 1_000_000.0  # 8 Mbit/s: a site's best (its bitrate not measured yet)
+_MEASURED_S = 10.0  # the buffer's bitrate, once it holds this much
 _ARCHIVE_JOIN_S = 2.0  # an archive part ending this near the buffer's start hops into it
 _PART_SLACK_S = 10.0  # a point this far before a part's start is still played from it
 _PART_STEP_S = 6.0  # a part that broke off having brought less than this has nothing more
@@ -1352,8 +1365,10 @@ class LiveSession(QObject):
         self._held, self._ad_held = None, False  # the viewer's pause or play from here
         self._caption_held = None  # (the AI captions' wait too: PlaybackSession's pause is it)
         if not self._paused:
-            # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
-            # or while recovering it is remembered: the stream that opens next is paused.
+            # From any mode, stay-live's own nudge or catch-up included: paused at 1x,
+            # time-shifted; 2.15: at a speed the viewer chose, at that speed (it plays on so,
+            # in the buffer and in a server part). Before ready or while recovering it is
+            # remembered: the stream that opens next is paused.
             self._paused = True
             self._end_picture()  # a pause ends the look (an open paused before it played: none)
             if self._aim_since is not None and self._retry in (_Retry.GO_LIVE, _Retry.REOPEN):
@@ -1361,14 +1376,16 @@ class LiveSession(QObject):
                 # (review M4: the wait went on and opened at live under the pause).
                 self._retry = None
                 self._end_aim()
-            self._set_rate(1.0)
             self._stay.user_paused()
+            self._set_rate(self._stay.chosen_rate)
+            _LOG.info("Paused (%gx).", self._rate)  # (2.15: which speed a pause keeps)
             if playing:
                 self._playback.set_paused(True)
             return
         self._paused = False
         if self._phase in (_Phase.STARTING, _Phase.WAITING):
             self._stay.user_go_live()  # nothing played yet, so nothing was time-shifted
+        _LOG.info("Playing on (%gx).", self._stay.chosen_rate)
         if not playing or self._deferred is not None:
             return  # the stream that opens next plays
         position = self._advance()
@@ -1551,9 +1568,10 @@ class LiveSession(QObject):
                         self._land_check = (self._clock(), pick[1], level, marks)
         finally:
             # Always, so StayLive's edge-triggered reopen re-arms; but a pause that was kept
-            # stays time-shifted: only the Go live button (it unpaused) returns to LIVE.
+            # stays time-shifted: only the Go live button (it unpaused) returns to LIVE. At live
+            # a chosen speed ends (2.15: a paused seek to the edge, a part's fallback, ...).
             if self._paused:
-                self._stay.user_paused()
+                self._stay.user_paused(keep_speed=False)
             else:
                 self._stay.user_go_live(keep_landing=merged)  # nothing opened: it stays
                 if landing is not None:
@@ -1905,14 +1923,23 @@ class LiveSession(QObject):
         the picture is was read from mid-word, "O beslediği takdirde" lost; from the segment
         before, it is read whole and shows for what is left of it), that segment's seq and its
         start on the timeline; with `after`, from the first segment that starts there or later
-        (past a jump the reader stopped at). None when no pipeline stream plays from the ring (a
-        direct play, the channel's server window or a provider archive, or nothing yet), or no
-        such segment."""
+        (past a jump the reader stopped at). 2.15 (the owner: "why i cannot use subs in kick
+        streams?"): while the picture plays a server part (a site's recording, the channel's
+        server window, a provider archive), from the part's own helper session, its segments
+        placed on the timeline (`ServerPart.offset`): the side reader reads only what the part
+        fetched, never a second connection. None when no pipeline stream plays (a direct play,
+        or nothing yet), while a part is on its way, or with no such segment."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return None
-        if self._part is not None or self._in_part or self._archive is not None:
-            return None
-        spans = self._engine.spans(self._sid)
+        part = self._part if self._part_playing else None
+        if part is not None:
+            if part.offset is None:
+                return None
+            sid, spans = part.sid, part.spans(self._engine.spans(part.sid))
+        elif self._in_part:
+            return None  # a part on its way (the next archive address too)
+        else:
+            sid, spans = self._sid, self._engine.spans(self._sid)
         if not spans:
             return None
         if after is not None:
@@ -1926,10 +1953,21 @@ class LiveSession(QObject):
                 (i for i in range(len(spans) - 1, -1, -1) if spans[i].start <= position), 0
             )
             span = spans[max(0, holds - 1)]
-        url = self._engine.stream_url(self._sid, span.seq, side=True)
+        url = self._engine.stream_url(sid, span.seq, side=True)
         if not url:
             return None
         return url, int(span.seq), float(span.start)
+
+    def caption_end(self) -> Optional[float]:
+        """2.15: where what AI captions read ends for good on the timeline: the end of the
+        server part the picture plays once its input ended (its side stream ends there; the
+        next part or the buffer is read next, `caption_source`); None otherwise."""
+        part = self._part if self._part_playing else None
+        if self._phase is not _Phase.PIPELINE or part is None or not part.ended:
+            return None
+        if part.offset is None:
+            return None
+        return part.offset + _number(self._engine.snapshot(part.sid).get("end"))
 
     def position(self) -> float:
         if self._phase is _Phase.PIPELINE:
@@ -4837,7 +4875,8 @@ class LiveSession(QObject):
             "stop_date": stop,
             "late_s": _JOIN_INSIDE_S,
             "grows": True,
-            "ahead_s": WINDOW_AHEAD_S,
+            "ahead_s": self._recording_ahead(snapshot),
+            "stop_ahead_s": WINDOW_AHEAD_S,
         }
         if route.steps:
             window["reload_s"] = RECORDING_RELOAD_S
@@ -4847,6 +4886,18 @@ class LiveSession(QObject):
         self._stop_sent = stop
         self._part_tries += 1
         _LOG.info("Opening the site's recording %.0f s before the buffer.", -self._before(t))
+
+    def _recording_ahead(self, snapshot: Mapping[str, Any]) -> float:
+        """How far a recording part fetches ahead (`RECORDING_AHEAD_S`): on disk all of it; in
+        memory as much as `_AHEAD_SHARE` of its ring holds at the buffer's bitrate (else
+        `_ASSUMED_BYTES_S`), never under `WINDOW_AHEAD_S`."""
+        if self._open_args.get("disk"):
+            return RECORDING_AHEAD_S
+        held = _number(snapshot.get("end")) - _number(snapshot.get("start"))
+        size = _number(snapshot.get("bytes"))
+        rate = size / held if held >= _MEASURED_S and size > 0 else _ASSUMED_BYTES_S
+        room = _AHEAD_SHARE * _number(self._open_args.get("max_bytes")) / rate
+        return max(WINDOW_AHEAD_S, min(RECORDING_AHEAD_S, room))
 
     def _place_recording(self, part: ServerPart, snapshot: Mapping[str, Any]) -> None:
         """2.15: a recording part goes where its first piece's date lies on the buffer's
