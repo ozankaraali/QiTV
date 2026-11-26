@@ -2385,6 +2385,36 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertEqual((self.timelines[-1]["mode"], self.timelines[-1]["rate"]), ("shifted", 1.0))
 
+    def test_a_pause_while_easing_into_live_keeps_the_eased_rate(self):
+        # Review: eased to 1.10x near live, a pause set the full 3x again (the chip said 3x).
+        self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_speed(3.0)
+        self.live._stay.update(self.live._stay.target + 0.7, False, now=self.clock.now)  # eased
+        self.live.toggle_pause()
+        self.assertEqual(self.playback.rates, [3.0, 1.10])
+        self.step(0.25, media=0)
+        self.assertEqual(self.timelines[-1]["rate"], 1.10)
+
+    def test_a_paused_seek_to_live_ends_a_chosen_speed(self):
+        # Review: the picture went to live (paused): the speed ends there, as at live.
+        self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_speed(1.5)
+        self.step(0.25, media=0.375)
+        self.live.toggle_pause()
+        self.live.seek_to(19.5)  # the edge
+        self.live.toggle_pause()
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.assertNotEqual(self.timelines[-1]["mode"], "catching_up")
+        self.assertEqual(self.timelines[-1]["rate"], 1.0)
+
     def test_a_pause_while_waiting_applies_once_it_plays(self):
         sid = self.start()
         self.live.toggle_pause()
@@ -8754,11 +8784,12 @@ class SiteRecordingTests(LiveSessionCase):
     SPANS = [Span(n, 2.0 * n, 2.0 * n + 2.0, False, media_seq=500 + n) for n in range(100)]
     URL = "https://rec.test/abc/1080p60/playlist.m3u8"
 
-    def playing(self, *, dated=True, spans=None):
+    def playing(self, *, dated=True, spans=None, disk=False, max_bytes=128 * MiB, size=0):
         """A dated 200 s buffer (2 s pieces from media sequence 500) whose second 0 is dated
-        10,000 (Unix seconds; now 10,200), and its site's recording from 6,400 on."""
+        10,000 (Unix seconds; now 10,200), and its site's recording from 6,400 on; `size`: the
+        bytes the buffer holds."""
         self.live._wall = lambda: 10_200.0
-        sid = self.start()
+        sid = self.start(disk=disk, max_bytes=max_bytes)
         self.engine.buffer(
             sid,
             spans or self.SPANS,
@@ -8767,6 +8798,7 @@ class SiteRecordingTests(LiveSessionCase):
             parts=[[0, 0.0, 10_000.0]],
             dates=[[0.0, 10_000.0]],
         )
+        self.engine._snapshots[sid]["bytes"] = size
         self.engine.sessionReady.emit(sid)
         self.live.set_site_recording(RecordingRoute(self.URL, 6_400.0, dated=dated, steps=True))
         return sid
@@ -8789,7 +8821,7 @@ class SiteRecordingTests(LiveSessionCase):
         self.assertNotIn("archive_part", state)
 
     def test_a_rewind_opens_the_recording_from_its_moment_to_the_buffers_start(self):
-        sid = self.playing()
+        sid = self.playing(disk=True)
         self.live.seek_to(-1_800.0)
         part, url, kwargs = self.engine.opened[-1]
         self.assertNotEqual(part, sid)
@@ -8860,13 +8892,33 @@ class SiteRecordingTests(LiveSessionCase):
         # read ahead (60 s of media past the picture) and their lead at 3x with translation
         # (3 x (LEAD_S 10 s + 7 s)); from its stop on a minute, as before: less than its join's
         # room in the buffer. (A provider's window and archive keep a minute: their tests.)
-        self.playing()
+        self.playing(max_bytes=512 * MiB)
         self.live.seek_to(-1_800.0)
         window = self.engine.opened[-1][2]["window"]
         self.assertEqual((window["ahead_s"], window["stop_ahead_s"]), (180.0, 60.0))
         self.assertGreater(window["ahead_s"], 60.0 + 3 * (10.0 + 7.0))
         self.assertLess(window["stop_ahead_s"], window["late_s"])
         self.assertEqual(len(self.engine.opened), 2)  # the buffer's and the part's, no other
+
+    def test_in_memory_a_recordings_reach_ahead_fits_its_ring(self):
+        # Review: what a part holds ahead is never evicted, and 180 s at 6 Mbit/s or more is
+        # over 60 % of a 128 MiB ring: nothing behind the picture would stay. Scaled to the
+        # buffer's own bitrate (else 8 Mbit/s), never under a minute; on disk all of it.
+        six = 200 * 750_000  # the 200 s buffer at 6 Mbit/s
+        for disk, ring, size, ahead in (
+            (False, 128 * MiB, six, 0.6 * 128 * MiB / 750_000),  # 107 s
+            (False, 512 * MiB, six, 180.0),
+            (False, 128 * MiB, 0, 0.6 * 128 * MiB / 1_000_000),  # not measured: 80 s
+            (False, 128 * MiB, 5 * six, 60.0),  # 30 Mbit/s: a minute still
+            (True, 128 * MiB, six, 180.0),
+        ):
+            with self.subTest(disk=disk, ring=ring, size=size):
+                self.live = self.make()
+                self.playing(disk=disk, max_bytes=ring, size=size)
+                self.live.seek_to(-1_800.0)
+                window = self.engine.opened[-1][2]["window"]
+                self.assertAlmostEqual(window["ahead_s"], ahead, places=3)
+                self.assertEqual(window["stop_ahead_s"], 60.0)
 
     def test_ai_captions_read_the_recording_from_its_own_session_on_the_timeline(self):
         # 2.15, the owner: "why i cannot use subs in kick streams?" ("Not available" there)

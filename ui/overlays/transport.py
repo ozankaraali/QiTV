@@ -505,7 +505,7 @@ class Transport(Overlay):
     stopRequested = Signal()  # 2.6: ■, every picture stops and nothing streams
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
-    speedRequested = Signal(float)
+    speedRequested = Signal(float, str)  # the rate, and the control it came from (2.15: logged)
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
@@ -2781,10 +2781,10 @@ class Transport(Overlay):
             elif name in ("slower", "faster"):
                 index = self._nearest_speed() + (1 if name == "faster" else -1)
                 if 0 <= index < len(SPEEDS):
-                    self._choose_speed(SPEEDS[index])
+                    self._choose_speed(SPEEDS[index], "the chip's " + name)
             elif name == "speed":
                 if self._speed != 1.0:
-                    self._choose_speed(1.0)
+                    self._choose_speed(1.0, "the chip's 1x")
             elif name == "fullscreen":
                 self.fullscreenRequested.emit()
             elif name == "audio":
@@ -2839,10 +2839,10 @@ class Transport(Overlay):
                 self.moreRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return
 
-    def _choose_speed(self, rate: float) -> None:
+    def _choose_speed(self, rate: float, control: str) -> None:
         self._speed = rate
         self.update()
-        self.speedRequested.emit(rate)
+        self.speedRequested.emit(rate, control)
 
     def _nearest_speed(self) -> int:
         return min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - self._speed))

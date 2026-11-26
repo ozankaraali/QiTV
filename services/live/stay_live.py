@@ -833,10 +833,13 @@ class StayLive:
         self._short_for = 0.0
         self._troubled = True
 
-    def user_paused(self) -> None:
+    def user_paused(self, *, keep_speed: bool = True) -> None:
         """A pause leaves LIVE, stay-live's own nudge or catch-up with it: it resumes
         time-shifted at 1x. 2.15 (the owner: "my speed resets to 1x"): a speed the viewer chose
-        holds, as in a video player, and eases into live as ever (`chosen_rate`)."""
+        holds, as in a video player, and eases into live as ever (`chosen_rate`); without
+        `keep_speed` (paused, the picture went to live: the speed ends there) it is 1x."""
+        if not keep_speed:
+            self._user_rate = self._eased = 1.0
         self.mode = Mode.CATCHING_UP if self._user_rate > 1 else Mode.SHIFTED
         self._nudge = None
         self._owed = False
@@ -845,8 +848,13 @@ class StayLive:
 
     @property
     def chosen_rate(self) -> float:
-        """2.15: the speed the viewer chose (1.0: none; at live, stay-live's own rate is none)."""
-        return 1.0 if self.mode is Mode.LIVE else self._user_rate
+        """2.15: the speed the viewer chose, as far as its easing into live took it (1.0: none;
+        at live, stay-live's own rate is none)."""
+        if self.mode is Mode.LIVE:
+            return 1.0
+        if self.mode is Mode.CATCHING_UP:
+            return min(self._user_rate, float(getattr(self, "_eased", self._user_rate)))
+        return self._user_rate
 
     def user_seeked_back(self) -> None:
         self._eased = self._user_rate  # 2.15 (third review): a seek puts the chosen speed back

@@ -117,6 +117,20 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(stay.chosen_rate, 1.0)
         self.assertEqual(stay.update(T + 12.0, False, now=clock.tick()), Decision(1.0))
 
+    def test_a_pause_while_eased_keeps_the_eased_rate_and_one_at_live_ends_it(self):
+        sl, clock = StayLive(), Clock()
+        sl.user_paused()
+        sl.user_speed(3.0)
+        S = T + 0.2
+        self.assertEqual(sl.update(S + 0.5, False, now=clock.tick()), Decision(1.10))
+        sl.user_paused()
+        self.assertEqual(sl.chosen_rate, 1.10)  # (review: not 3x again)
+        self.assertEqual(sl.update(S + 0.6, False, now=clock.tick()), Decision(1.10))
+        sl.user_paused(keep_speed=False)  # paused, the picture went to live
+        self.assertIs(sl.mode, Mode.SHIFTED)
+        self.assertEqual(sl.chosen_rate, 1.0)
+        self.assertEqual(sl.update(100, False, now=clock.tick()), Decision(1.0))
+
     def test_buffering_in_shifted(self):
         sl, clock = StayLive(), Clock()
         sl.user_paused()
