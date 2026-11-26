@@ -1819,9 +1819,13 @@ class ServerPartPacingTests(unittest.TestCase):
         url = upstream.url + "/user/secret/live.m3u8"
         helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
         helper.wait_for(lambda m: m == ("ready", "p"))
-        time.sleep(1.5)
-        asked = len(upstream.requests)
-        self.assertLess(asked, 1 + 10)  # held about 3 s ahead
+        asked = -1
+        for _ in range(20):  # until it holds (its asks stop), about 3 s ahead
+            if asked == len(upstream.requests):
+                break
+            asked = len(upstream.requests)
+            time.sleep(0.5)
+        self.assertLess(asked, 1 + 10)
         ring = helper.helper._sessions["p"]._ring
         side = urlopen(server.stream_url("p", ring.oldest_seq, side=True), timeout=1)
         self.addCleanup(side.close)

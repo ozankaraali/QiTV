@@ -133,8 +133,8 @@ PREVIOUS_LINE_S = 10.0
 RESYNC_STEP_S = 0.1
 RESYNC_TRIES = 5
 NO_SOUND_S = 12.0
-# 2.15: a server part's run that ended this far ahead of the picture, or this near the part's
-# end, is not read again until the picture is this near what it read (`_on_ended`)
+# 2.15: a server part's run that ended this far ahead of the picture is not read again until the
+# picture is this near what it read (`_on_ended`)
 _PART_END_S = 2.0
 _SLOW_RTF = 0.9  # the model takes this long per second of speech: it can't keep up
 # 2.9.6: the first question's yes (it said every language's model may come): they download as
@@ -318,8 +318,9 @@ class CaptionsController(QObject):
         self._gone = float("-inf")  # the start of the latest cue whose time on screen ended
         self._newest: Optional[float] = None  # the newest second the run has read
         self._written: Optional[float] = None  # the second its captions are written to
-        # 2.15: the run's stream of a server part ended ahead of the picture (`_on_ended`)
-        self._read_out = False
+        # 2.15: the run's stream of a server part ended ahead of the picture, or (`_read_whole`)
+        # at the part's end for good (`_on_ended`)
+        self._read_out = self._read_whole = False
         self._rtf = 0.0
         self._slow_since: Optional[float] = None
         self._qwen_writes = True  # Qwen writes the run's language (no specialist does)
@@ -1618,7 +1619,7 @@ class CaptionsController(QObject):
 
     def _start_run(self) -> None:
         self._restart.stop()  # this is the start a pending restart was for
-        self._read_out = False  # (a part's run that stopped short: this one reads on)
+        self._read_out = self._read_whole = False  # (a part's run that ended: this one reads)
         if not self._enabled or not self._ready:
             return
         if not self._is_live():
@@ -1838,14 +1839,18 @@ class CaptionsController(QObject):
     def _on_ended(self, run: int, reason: str) -> None:
         if run != self._run or not self._enabled:
             return
-        if self._in_part() and self._newest is not None:
-            newest = float(self._newest)
-            if newest > self._position() + _PART_END_S or self._read_to_end(newest):
-                # 2.15: a server part's stream ends at what its helper fetched, ahead of the
-                # picture: the run's words still come; read on once the picture gets there
-                # (`_read_on_in_part`), not again and again from the picture over the same
-                # stretch (each new run stops the last, its words not written yet lost)
-                self._read_out = True
+        if self._in_part():
+            # 2.15: a server part's stream ends at what its helper fetched, ahead of the picture:
+            # the run's words still come (it is not started again and again over the same
+            # stretch: each new run stops the last before it writes). Ended cleanly once the
+            # part's input is over, it read the part to its end (a short tail at once, before
+            # any progress): the next part or the buffer, another session, starts the next run
+            # (`_tick`). Ended short of that ahead of the picture (a read timed out at what the
+            # helper had), it reads on from the picture once the picture gets there.
+            whole = reason == "ended" and self._part_ended()
+            ahead = self._newest is not None and self._newest > self._position() + _PART_END_S
+            if whole or ahead:
+                self._read_out, self._read_whole = True, whole
                 return
         self._restart.start()  # the reader fell behind or lost the stream: again, once
 
@@ -1855,23 +1860,18 @@ class CaptionsController(QObject):
         inside = getattr(live, "in_server_part", None)
         return bool(inside()) if callable(inside) else False
 
-    def _read_to_end(self, newest: float) -> bool:
-        """2.15: the run read the server part the picture plays to its end, its input over
-        (LiveSession.caption_end): the next part or the buffer, another session, starts the
-        next run (`_tick`)."""
+    def _part_ended(self) -> bool:
+        """2.15: the server part the picture plays has all its input (LiveSession.caption_end)."""
         live = self._live() if self._is_live() else None
         end = getattr(live, "caption_end", None)
-        end = end() if callable(end) else None
-        return end is not None and newest >= float(end) - _PART_END_S
+        return callable(end) and end() is not None
 
     def _read_on_in_part(self) -> bool:
-        """2.15: the picture reached what the run read of a server part before its stream ended
-        short of the part's end (`_on_ended`: a read timed out at what the helper had): read on
-        from the picture."""
-        if not self._read_out or self._newest is None:
+        """2.15: the picture reached what a run read of a server part before its stream ended
+        short of the part's end (`_on_ended`): read on from the picture."""
+        if not self._read_out or self._read_whole or self._newest is None:
             return False
-        newest = float(self._newest)
-        return self._position() >= newest - _PART_END_S and not self._read_to_end(newest)
+        return self._position() >= float(self._newest) - _PART_END_S
 
     # ---- every tick: the picture's place --------------------------------------------------
     def _tick(self) -> None:

@@ -2401,6 +2401,18 @@ class ControllerTimingTests(unittest.TestCase):
         self.at(-1_761.5)
         self.assertEqual(self.captions._run, run + 1)  # from the picture there
 
+    def test_a_short_tail_of_an_ended_part_read_at_once_is_not_read_again(self):
+        # Begun within a minute of an ended part's end, a run reads all of it before any
+        # progress: "ended" came first, and a restart each second stopped it before it wrote.
+        run = self.in_part(end=-1_760.0)
+        self.captions._on_ended(run, "ended")
+        self.assertFalse(self.captions._restart.isActive())
+        self.captions._on_progress(run, -1_801.0, 0.3)  # late, and short of the picture yet
+        self.sent.clear()
+        for position in (-1_799.0, -1_790.0, -1_770.0, -1_761.0):
+            self.at(position)
+        self.assertEqual([m for m in self.sent if m[0] == "start"], [])
+
     def test_off_gives_the_picture_back_and_clears_the_screen(self):
         self.captions._on_caption(self.captions._run, 10.0, 12.0, "x")
         self.at(10.5)
