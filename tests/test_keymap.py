@@ -242,6 +242,45 @@ class ClosedKeymapTests(unittest.TestCase):
                 )
                 self.assertIsNone(resolve(key.value, mods, "", context="player", platform=platform))
 
+    def test_the_keys_where_the_brackets_sit_step_the_speed(self):
+        # The owner's Turkish keyboard has ğ and ü where an English one has [ and ]: the key's
+        # place counts too (a Mac's key code, the scan code elsewhere), after what its letter
+        # means, so a German keyboard's + there stays the volume.
+        gbreve, udiaeresis = 0x011E, K.Key_Udiaeresis.value  # Qt names ğ by its capital
+        for platform, left, right in (
+            ("darwin", 0x21, 0x1E),
+            ("win32", 0x1A, 0x1B),
+            ("linux", 34, 35),
+        ):
+            for context in ("player", "guide"):
+                with self.subTest(platform=platform, context=context):
+                    for key, mods, text, place, action in (
+                        (gbreve, NONE, "ğ", left, Action.SLOWER),
+                        (udiaeresis, NONE, "ü", right, Action.FASTER),
+                        (udiaeresis, SHIFT, "Ü", right, Action.FASTER),
+                    ):
+                        found = resolve(
+                            key, mods, text, context=context, platform=platform, place=place
+                        )
+                        self.assertEqual(found, (action, ""))
+                    plus = resolve(
+                        K.Key_Plus.value, NONE, "+", context=context, platform=platform, place=right
+                    )
+                    self.assertEqual(plus, (Action.VOL_UP, ""))
+            with self.subTest(platform=platform, what="not ours"):
+                for mods in (CTRL, ALT, META, CTRL | ALT):
+                    self.assertIsNone(
+                        resolve(gbreve, mods, "ğ", context="player", platform=platform, place=left)
+                    )
+                self.assertEqual(  # the lists type the letter
+                    resolve(gbreve, NONE, "ğ", context="drawer", platform=platform, place=left),
+                    (Action.NAV_TEXT, "ğ"),
+                )
+        # Another platform's code is no place, and neither is none (the phone remote's keys).
+        elsewhere = resolve(gbreve, NONE, "ğ", context="player", platform="darwin", place=0x1A)
+        self.assertIsNone(elsewhere)
+        self.assertIsNone(resolve(gbreve, NONE, "ğ", context="player", platform="darwin"))
+
 
 class AsIntTests(unittest.TestCase):
     def test_accepts_enums_ints_and_none(self):

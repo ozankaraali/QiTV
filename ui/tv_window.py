@@ -167,7 +167,7 @@ from ui.find_session import FindSession
 from ui.float_controls import FloatControls
 from ui.free_channels_menu import FreeLists
 from ui.grid_frame import GridFrame
-from ui.keymap import Action, as_int, resolve
+from ui.keymap import Action, as_int, key_place, resolve
 from ui.library.library_screen import LibraryScreen
 from ui.library_layer import LibraryLayer
 from ui.link_lanes import Target
@@ -1850,7 +1850,13 @@ class TVWindow(QMainWindow):
         return self.controller.key_context()
 
     def _resolve(self, event: QKeyEvent):
-        return resolve(event.key(), event.modifiers(), event.text(), context=self._key_context())
+        return resolve(
+            event.key(),
+            event.modifiers(),
+            event.text(),
+            context=self._key_context(),
+            place=key_place(event),
+        )
 
     def event(self, event: QEvent) -> bool:
         if (

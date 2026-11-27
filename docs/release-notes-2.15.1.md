@@ -1,7 +1,7 @@
 # QiTV 2.15.1
 
-QiTV 2.15.1 is a round of small things: <kbd>[</kbd> and <kbd>]</kbd> step the playback speed, a
-speed you chose holds through a pause, AI captions work when you rewind past the buffer into a
+QiTV 2.15.1 is a round of small things: <kbd>[</kbd> and <kbd>]</kbd> (<kbd>ğ</kbd> and
+<kbd>ü</kbd> on a Turkish keyboard) step the playback speed, a speed you chose holds through a pause, AI captions work when you rewind past the buffer into a
 Kick or Twitch recording or a channel's archive, Network streams' rows have a right-click menu,
 and the small windows of picture in picture are easier to resize by their edges. 2.15.1 also
 brings 2.15.0: Kick and Twitch channels, their videos, clips and rewind, typing and opening links
@@ -17,8 +17,10 @@ others' distributions, which may have malware.**
 - **<kbd>[</kbd> slower, <kbd>]</kbd> faster.** The keys step the speed as the speed chip's
   **−** and **+** do, from 0.5× to 3×, for a film or a live channel you've rewound, even in a
   window too small to show **−** and **+**. At the live edge they do nothing, as the buttons.
-  On a Mac's Turkish keyboard ⌥8 and ⌥9 type the brackets and work, and so do brackets typed
-  with AltGr on Windows and Linux; ⌘[ and ⌘] stay free for what they mean. The buttons'
+  On any keyboard the two keys where an English one has [ and ] work the same: **ğ** and
+  **ü** on a Turkish keyboard, for example (a key there that means something else in QiTV,
+  such as a German keyboard's **+**, keeps it). Brackets typed with ⌥8 and ⌥9 on a Mac or with
+  AltGr on Windows and Linux work too; ⌘[ and ⌘] stay free for what they mean. The buttons'
   tooltips name the keys.
 - **A speed you chose holds through a pause.** Play after a pause came back at 1×. It now goes
   on at your speed, in the buffer and in a recording you rewound into, and reaching live still
