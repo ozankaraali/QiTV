@@ -296,12 +296,15 @@ def pcr_of(packet):
     return (b[0] << 25) | (b[1] << 17) | (b[2] << 9) | (b[3] << 1) | (b[4] >> 7)
 
 
-def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02):
-    """A close-delimited body that streams at a few times real time until the client hangs up."""
+def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02, backlog=0):
+    """A close-delimited body that streams at a few times real time until the client hangs up
+    (its first `backlog` bytes at once)."""
 
     def body(request):
         try:
-            for offset in range(0, len(payload), block):
+            if backlog:
+                request.wfile.write(payload[:backlog])
+            for offset in range(backlog, len(payload), block):
                 if stop.wait(interval):
                     return
                 request.wfile.write(payload[offset : offset + block])
@@ -321,6 +324,8 @@ def paced_route(payload, stop, hung_up, **pace):
 # 1.5 times real time, as a live channel after its backlog. At the default pace (6 times) a
 # tune's not-live guard (2.8.11) holds the bytes its longest, 4 s, before the session is ready.
 LIVE_PACE = {"block": 188 * 5}
+# ... and as a live channel's connection brings it: its backlog (some 8 s) at once first.
+BACKLOG_PACE = {**LIVE_PACE, "backlog": 188 * 1400}
 
 
 class StalledUpstream:
@@ -1097,7 +1102,8 @@ class LiveWorkerTests(unittest.TestCase):
         # A live input that turns out scrambled: its upstream is released at the error.
         hung_up = threading.Event()
         live = make_stream(30, scrambled=True)
-        routes["/user/secret/scrambled-live"] = paced_route(live, self.stop, hung_up)
+        scrambled = paced_route(live, self.stop, hung_up, **BACKLOG_PACE)
+        routes["/user/secret/scrambled-live"] = scrambled
         source = self.source(routes)
         helper = self.helper()
         for name in [*bodies, "scrambled-live"]:
@@ -1800,6 +1806,49 @@ class ServerPartPacingTests(unittest.TestCase):
         time.sleep(1.5)
         self.assertGreater(len(fetched()), len(before))
 
+    def test_a_side_reader_of_a_server_part_fetches_nothing_more(self):
+        # 2.15: AI captions read a part through its side stream. Only the player's reads pace
+        # its fetching (the server's own `reading`): a side reader read dry asks nothing
+        # upstream; the player reading on does.
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:1,\ns{n}.ts\n" for n in range(10))
+        routes = {
+            f"/user/secret/s{n}.ts": (200, {}, make_stream(1, pts_start=900000 + n * 90000))
+            for n in range(10)
+        }
+        routes["/user/secret/live.m3u8"] = (200, {}, text.encode())
+        upstream = LocalSource(routes)
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        server = helper.helper.server
+        window = {"back_s": 10.0, "ahead_s": 3.0}
+        url = upstream.url + "/user/secret/live.m3u8"
+        helper.parent.send(("open", "p", url, {}, True, RAM, 6.0, {"window": window}))
+        helper.wait_for(lambda m: m == ("ready", "p"))
+        asked = -1
+        for _ in range(20):  # until it holds (its asks stop), about 3 s ahead
+            if asked == len(upstream.requests):
+                break
+            asked = len(upstream.requests)
+            time.sleep(0.5)
+        self.assertLess(asked, 1 + 10)
+        ring = helper.helper._sessions["p"]._ring
+        side = urlopen(server.stream_url("p", ring.oldest_seq, side=True), timeout=1)
+        self.addCleanup(side.close)
+        read = 0
+        try:
+            while chunk := side.read1(64 * 1024):
+                read += len(chunk)
+        except OSError:  # (its timeout) it read all the part holds, and waits for more
+            pass
+        self.assertGreater(read, 0)
+        time.sleep(1.0)
+        self.assertEqual(len(upstream.requests), asked)  # nothing more asked upstream
+        self.assertIsNone(server.reading("p"))  # (the player's alone)
+        player = urlopen(server.stream_url("p", ring.newest_seq), timeout=5)
+        self.addCleanup(player.close)
+        self.assertTrue(wait_until(lambda: len(upstream.requests) > asked, 5000))
+
 
 class ServerPartProtectionTests(unittest.TestCase):
     def test_a_server_part_protects_what_the_player_reads(self):
@@ -2057,7 +2106,8 @@ class ParkResumeTests(unittest.TestCase):
     def test_park_closes_the_upstream_and_keeps_serving(self):
         stop, hung_up = threading.Event(), threading.Event()
         self.addCleanup(stop.set)
-        upstream = self.source({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        route = paced_route(make_stream(60), stop, hung_up, **BACKLOG_PACE)
+        upstream = self.source({SECRET_PATH: route})
         helper = InProcessHelper(self)
         helper.parent.send(("open", "p", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
         helper.wait_for(lambda m: m == ("ready", "p"))
@@ -2214,7 +2264,8 @@ class ParkResumeTests(unittest.TestCase):
         # Review I2: another player takes the ring back before "parked" came.
         stop, hung_up = threading.Event(), threading.Event()
         self.addCleanup(stop.set)
-        upstream = self.source({SECRET_PATH: paced_route(make_stream(60), stop, hung_up)})
+        route = paced_route(make_stream(60), stop, hung_up, **BACKLOG_PACE)
+        upstream = self.source({SECRET_PATH: route})
         good = self.source({SECRET_PATH: (200, {}, make_stream(6, pts_start=AHEAD))})
         helper = InProcessHelper(self)
         helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))

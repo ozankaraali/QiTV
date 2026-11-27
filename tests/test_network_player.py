@@ -28,7 +28,7 @@ from services.jobs import JobRunner
 from services.link_kind import FILM, LIVE, host_of, owner_of
 from services.live.refusals import STREAM_REFUSED
 from services.live_sites import KICK, Resolved, SiteError, SitePage
-from services.navigation import LINKS_LAYER, RECENT_GROUP, NavNode
+from services.navigation import LINK_LAYER, LINKS_LAYER, RECENT_GROUP, NavNode
 from services.network_streams import NetworkStreams, stream_id
 from services.parental import Parental
 from services.provider_ids import NETWORK_PROVIDER
@@ -652,6 +652,31 @@ class _Kept:
         pass
 
 
+class ItemOfTests(PlayerCase):
+    """A kept link as `play_kept` hands it over, without playing it (`item_of`: what its row's
+    menu and a tile it is dragged onto play): its kept address, whose stream it is now (an
+    account's link its account's), and its kind."""
+
+    ACCOUNT = "http://harbor.example:8080/live/demo/secret/7.ts"
+
+    def test_item_of_is_what_play_kept_hands_over(self):
+        live = self.store.keep(URL, "Harbour News", LIVE)
+        film = self.store.keep(FILM_URL, "Harbour film", FILM)
+        account = self.store.keep(self.ACCOUNT, "Seven", LIVE)
+        item = {"id": live.id, "name": "Harbour News", "cmd": URL, "_provider": NETWORK_PROVIDER}
+        self.assertEqual(self.player.item_of(live.id), (item, LIVE))
+        self.assertEqual(self.player.item_of(account.id)[0]["_provider"], "Harbor IPTV")
+        self.assertEqual(self.player.item_of(film.id)[1], FILM)
+        self.assertIsNone(self.player.item_of(stream_id("https://cdn.example/gone.m3u8")))
+        self.assertEqual(self.player._handed, {})  # (only what plays changes a link's kind)
+        with mock.patch.object(self.controller, "play_link") as play:
+            for entry in (live, film, account):
+                self.assertTrue(self.player.play_kept(entry.id))
+                item, kind = self.player.item_of(entry.id)
+                section = "movies" if kind == FILM else "live"
+                self.assertEqual(play.call_args.args, (item, section))
+
+
 class HiddenLinkTests(PlayerCase):
     """Final review (maintenance) I1: a link hidden with "Hide (parental controls)" is hidden
     as a hidden channel is while locked. Network streams doesn't list it, nothing plays it
@@ -736,6 +761,27 @@ class HiddenLinkTests(PlayerCase):
             played.append(self.controller.now_playing().item["id"])
         self.assertEqual(played, [stream_id(self.OTHER), stream_id(URL), stream_id(self.OTHER)])
         self.assertEqual(self.budget.holders("Harbor IPTV"), [])
+
+    def test_a_network_streams_rows_hide_hides_the_link(self):
+        # Its row's menu (the find's too) hides it as ⟲ Recent's does: by its id, gone from
+        # the list once locked, and no menu for it then.
+        self.keep(URL, self.OTHER)
+
+        def menu_of(key):
+            with tvc.shown_menus() as popup:
+                self.drawer.contextRequested.emit(NavNode(LINK_LAYER, key, "Row"), QPoint(5, 5))
+            shown = tvc.menus_of(popup)
+            return shown[0][0] if shown else None
+
+        menu = menu_of(stream_id(URL))
+        hide = "Hide (parental controls)"
+        self.assertEqual(menu.texts(), [hide, "Play in VLC", "Play in MPV", "Copy stream link"])
+        menu.entry(hide).trigger()
+        self.assertEqual(len(self.guard.hidden()), 1)
+        self.guard.lock()
+        self.controller.parental_changed()  # as the window tells it
+        self.assertEqual(self.listed(), [stream_id(self.OTHER)])
+        self.assertIsNone(menu_of(stream_id(URL)))
 
     def test_a_hidden_link_that_plays_stops_at_the_lock_and_never_enters_the_history(self):
         self.keep(self.OTHER, self.ACCOUNT)
@@ -1045,8 +1091,16 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.live.play_pipeline()
         self.plays_now()
         starts = len(self.starts())
-        self.live.failed.emit(message)
+        self.buffer_fails(message)
         return starts
+
+    def buffer_fails(self, message=STREAM_REFUSED):
+        """The buffer fails; the stop that follows lets its upstream go at once, as LiveSession
+        says once it closed (not after the release's cap)."""
+        stops = len(self.live.named("stop"))
+        self.live.failed.emit(message)
+        if len(self.live.named("stop")) > stops:
+            self.live.released.emit()
 
     def test_a_site_link_whose_buffer_fails_asks_the_site_again(self):
         self.answers = [MASTER, MASTER_FRESH]
@@ -1103,7 +1157,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
             self.live.play_pipeline()
             self.plays_now()
             began = time.monotonic()
-            self.live.failed.emit(STREAM_REFUSED)  # again, at once
+            self.buffer_fails()  # again, at once
             self.assertTrue(wait_until(lambda: self.pill_text() is not None))
             self.assertTrue(
                 wait_until(lambda: len(self.starts()) == starts + count, timeout_ms=5000)
@@ -1139,7 +1193,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.plays_now()
         pause(300)  # HEALTHY_S since its first picture
         self.plays_now()  # its hold let go: "playing" again
-        self.live.failed.emit(STREAM_REFUSED)
+        self.buffer_fails()
         self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 2))
         self.assertEqual(self.starts()[-1][0], MASTER_OTHER)
         self.assertEqual(len(self.asked), 3)
@@ -1156,7 +1210,7 @@ class SiteTests(tvc.RetryPillCase, PlayerCase):
         self.plays_now()
         starts = len(self.starts())
         self.live.retrying.emit(5.0)  # the helper waits for its stream
-        self.live.failed.emit(STREAM_REFUSED)  # its one try met the token's death
+        self.buffer_fails()  # its one try met the token's death
         self.assertTrue(wait_until(lambda: len(self.starts()) == starts + 1))
         self.assertEqual(self.starts()[-1][0], MASTER_FRESH)
         self.assertEqual(len(self.asked), 2)

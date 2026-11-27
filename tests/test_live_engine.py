@@ -28,7 +28,7 @@ from urllib.request import urlopen
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from gc_fixtures import collect_on_the_gui_thread
-from http_fixtures import LocalSource
+from http_fixtures import LocalSource, live_body
 from process_fixtures import still_running, terminate
 from timer_fixtures import pause
 from ts_fixtures import make_stream
@@ -142,18 +142,9 @@ def session_dirs(root):
 
 
 def paced_body(payload, stop, hung_up):
-    """A close-delimited body streamed a few times faster than real time."""
-
-    def body(request):
-        try:
-            for offset in range(0, len(payload), 188 * 20):
-                if stop.wait(0.02):
-                    return
-                request.wfile.write(payload[offset : offset + 188 * 20])
-        except OSError:
-            hung_up.set()
-
-    return body
+    """A close-delimited body as a live channel's: its backlog at once, then some 1.5 times
+    real time (`live_body`: the not-live guard lets it pass within about a second)."""
+    return live_body(payload, stop, hung_up)
 
 
 def paced_route(payload, stop, hung_up):

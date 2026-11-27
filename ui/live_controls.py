@@ -1527,7 +1527,8 @@ class LiveControls(QObject):
             return False
         return self.catchup.open(current, moment)
 
-    def _set_speed(self, rate: float) -> None:
+    def _set_speed(self, rate: float, control: str = "") -> None:
+        logger.info("The viewer chose %gx (%s).", rate, control or "elsewhere")
         if self.catchup.active():
             self.session.set_rate(rate)
             self.catchup.set_rate(rate)

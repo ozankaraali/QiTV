@@ -3,7 +3,8 @@ the providers' once the store has one. It is no provider: All providers, the pro
 on rows and every other count of providers never see it. Its rows say what each link is ("Live",
 "Film · stopped at 41:12") or why it failed last time, in the warning colour; one chosen plays
 through the network player (its kind, whose stream it is), as one the find finds by its name
-does. Fictional hosts; nothing is fetched."""
+does. Either row's menu and drag are the kept link's as it plays. Fictional hosts; nothing is
+fetched."""
 
 import os
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from services.provider_ids import ALL_PROVIDERS, NETWORK_PROVIDER
 from services.watch_state import WatchState
 from tests.test_find import FakeProviders
 from tests.test_navigation import FakeCatalog
+from tests.test_tv_controller import menus_of, shown_menus
 from tests.test_tv_window import WindowCase
 from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays import drawer as drawer_module
@@ -47,6 +49,7 @@ LIVE_URL = "https://cdn.example/live/harbour/index.m3u8?token=aaa"
 FILM_URL = "https://vod.example/films/lecture.mkv?token=aaa"
 FAILED_URL = "https://cdn.example/live/channel/index.m3u8?token=old"
 OTHER_FILM_URL = "https://vod.example/films/concert.mp4"
+ACCOUNT_URL = "http://harbor.example:8080/live/demo/secret/7.ts"
 ROWS = [
     LinkRow("a1", "Harbour News", LIVE),
     LinkRow("b2", "Lecture recording", FILM, stopped_ms=2_472_000),
@@ -66,6 +69,61 @@ class OneProvider(FakeCatalog):
 def heads(nodes):
     """The sources column's rows above its action rows: (layer, key, title, count)."""
     return [(n.layer, n.key, n.title, n.count) for n in nodes if n.layer != "action"]
+
+
+class Pointer:
+    """A drawer's right column under the mouse (`self.drawer` over `self.host`): a row's
+    drag out over the grid, and a right-click."""
+
+    def row(self, title):
+        rows = enumerate(self.drawer._columns["right"].nodes)
+        return next(
+            (r for r, n in rows if n.layer in ("item", LINK_LAYER) and n.title == title), None
+        )
+
+    def centre(self, title):
+        view = self.drawer._columns["right"].view
+        return view.visualRect(view.model().index(self.row(title), 0)).center()
+
+    def mouse(self, kind, point, buttons=Qt.MouseButton.LeftButton):
+        viewport = self.drawer._columns["right"].view.viewport()
+        event = QMouseEvent(
+            kind,
+            QPointF(point),
+            QPointF(viewport.mapToGlobal(point)),
+            Qt.MouseButton.LeftButton,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(viewport, event)
+
+    def drag(self, title):
+        start = self.centre(title)
+        self.mouse(QEvent.Type.MouseButtonPress, start)
+        self.mouse(QEvent.Type.MouseMove, start + QPoint(60, 0))
+        self.mouse(QEvent.Type.MouseMove, start + QPoint(700, 40))  # out over the grid
+        self.mouse(QEvent.Type.MouseButtonRelease, start + QPoint(700, 40), Qt.MouseButton.NoButton)
+
+    def right_click(self, title):
+        view = self.drawer._columns["right"].view
+        point = view.viewport().mapTo(self.host, self.centre(title))
+        QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.RightButton, pos=point)
+
+    def record(self):
+        """The drawer's drags, drops, menus and finds, as (name, node) in turn."""
+        self.events = []
+        for signal, name in (
+            (self.drawer.channelDragged, "drag"),
+            (self.drawer.channelDropped, "drop"),
+            (self.drawer.contextRequested, "menu"),
+            (self.drawer.channelFound, "found"),
+        ):
+            signal.connect(lambda node, *_rest, name=name: self.events.append((name, node)))
+        self.drawer.set_drag_enabled(lambda: True)  # the multiview's grid shows
+
+    def seen(self):
+        """What the drawer said: (name, the node's layer, key and payload)."""
+        return [(name, node.layer, node.key, node.payload) for name, node in self.events]
 
 
 class SourceTests(unittest.TestCase):
@@ -131,7 +189,7 @@ class SourceTests(unittest.TestCase):
         )
 
 
-class RowTests(unittest.TestCase):
+class RowTests(Pointer, unittest.TestCase):
     """The drawer over the navigation tests' catalog, one provider and four links."""
 
     @classmethod
@@ -255,10 +313,46 @@ class RowTests(unittest.TestCase):
         self.assertTrue(all(color == QColor(0, 0, 0) for color in below))
         self.assertNotEqual(view.itemDelegate().cut_text(index), "")  # (the tooltip says it)
 
+    def test_a_links_row_has_the_kept_links_menu_and_a_live_one_drags_out_as_it_plays(self):
+        # Its menu (a right-click, the menu key) is asked for as a link's row keyed by its id:
+        # the controller makes it of the link as it plays. A live link drags out onto a tile
+        # as its network player hands it over (its address, whose stream it is); a film never.
+        live = {"id": "a1", "name": "Harbour News", "cmd": ACCOUNT_URL, "_provider": "Harbor IPTV"}
+        film = {"id": "b2", "name": "Lecture recording", "cmd": FILM_URL}
+        kept = {"a1": (live, LIVE), "b2": ({**film, "_provider": NETWORK_PROVIDER}, FILM)}
+        self.drawer.set_link_item(kept.get)
+        self.record()
+        self.nav.open(next(n for n in self.nav.children(None) if n.layer == LINKS_LAYER))
+        self.drawer.open_drawer()
+        self.assertEqual(self.drawer.highlighted().key, "a1")
+        self.assertTrue(self.drawer.context_key())
+        self.right_click("Lecture recording")
+        self.drag("Lecture recording")  # a film: no drag, and no click either
+        self.drag("Harbour News")
+        self.assertEqual(
+            self.seen(),
+            [
+                ("menu", LINK_LAYER, "a1", None),
+                ("menu", LINK_LAYER, "b2", None),
+                ("drag", "item", "a1", live),
+                ("drop", "item", "a1", live),
+            ],
+        )
+        self.assertEqual(self.played, [])
+        # A link no longer kept: no menu, no drag.
+        self.events.clear()
+        del kept["a1"]
+        self.assertFalse(self.drawer.context_key())
+        self.right_click("Harbour News")
+        self.drag("Harbour News")
+        self.assertEqual(self.events, [])
 
-class FoundLinkTests(unittest.TestCase):
-    """The find over one provider's channel and a film link of Network streams: the link
-    plays as it was kept (Enter, a click), and is no channel otherwise."""
+
+class FoundLinkTests(Pointer, unittest.TestCase):
+    """The find over one provider's channel and two links of Network streams, a film and an
+    account's live link: each plays as it was kept (Enter, a click). Its menu and its drag are
+    the kept link's as it plays (by its id: its address, whose stream it is), never the find's
+    plain dict's (no address, no owner): a film never drags out onto a tile."""
 
     @classmethod
     def setUpClass(cls):
@@ -274,65 +368,59 @@ class FoundLinkTests(unittest.TestCase):
         self.addCleanup(self.host.close)
         self.drawer = Drawer(self.nav, None, lambda item: None, self.host)
         caches = [("Home", {"itv": live_content(["Lecture One"], {"News": [0]})})]
-        link = {"id": "b2", "name": "Lecture recording", "_provider": NETWORK_PROVIDER}
-        finder = FindSession(FakeProviders(caches), ImmediateRunner(), links=lambda: [link])
+        links = [
+            {"id": "b2", "name": "Lecture recording", "_provider": NETWORK_PROVIDER},
+            {"id": "e5", "name": "Lecture hall live", "_provider": NETWORK_PROVIDER},
+        ]
+        finder = FindSession(FakeProviders(caches), ImmediateRunner(), links=lambda: links)
         self.drawer.set_finder(finder)
-        self.events = []
-        for signal, name in (
-            (self.drawer.channelDragged, "drag"),
-            (self.drawer.channelDropped, "drop"),
-            (self.drawer.contextRequested, "menu"),
-            (self.drawer.channelFound, "found"),
-        ):
-            signal.connect(lambda node, *_rest, name=name: self.events.append((name, node)))
-        self.drawer.set_drag_enabled(lambda: True)  # the multiview's grid shows
+        # The network player's: an account's live link, and a film of no provider's
+        self.live = {"id": "e5", "name": "Lecture hall live", "cmd": ACCOUNT_URL}
+        self.live["_provider"] = "Harbor IPTV"
+        film = {"id": "b2", "name": "Lecture recording", "cmd": FILM_URL}
+        self.kept = {"e5": (self.live, LIVE), "b2": ({**film, "_provider": NETWORK_PROVIDER}, FILM)}
+        self.drawer.set_link_item(self.kept.get)
+        self.record()
         self.nav.reset_to("live", "10")  # a live section under the find
         self.drawer.open_drawer()
         self.drawer.type_text("lecture")
         elapse(FIND_WAIT)
         self.right = self.drawer._columns["right"]
         self.assertTrue(wait_until(lambda: self.row("Lecture recording") is not None))
+        self.assertIsNotNone(self.row("Lecture hall live"))
 
-    def row(self, title):
-        return next(
-            (r for r, n in enumerate(self.right.nodes) if n.layer == "item" and n.title == title),
-            None,
-        )
-
-    def centre(self, title):
-        view = self.right.view
-        return view.visualRect(view.model().index(self.row(title), 0)).center()
-
-    def mouse(self, kind, point, buttons=Qt.MouseButton.LeftButton):
-        viewport = self.right.view.viewport()
-        event = QMouseEvent(
-            kind,
-            QPointF(point),
-            QPointF(viewport.mapToGlobal(point)),
-            Qt.MouseButton.LeftButton,
-            buttons,
-            Qt.KeyboardModifier.NoModifier,
-        )
-        QApplication.sendEvent(viewport, event)
-
-    def drag(self, title):
-        start = self.centre(title)
-        self.mouse(QEvent.Type.MouseButtonPress, start)
-        self.mouse(QEvent.Type.MouseMove, start + QPoint(60, 0))
-        self.mouse(QEvent.Type.MouseMove, start + QPoint(700, 40))  # out over the grid
-        self.mouse(QEvent.Type.MouseButtonRelease, start + QPoint(700, 40), Qt.MouseButton.NoButton)
-
-    def right_click(self, title):
-        view = self.right.view
-        point = view.viewport().mapTo(self.host, self.centre(title))
-        QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.RightButton, pos=point)
-
-    def test_a_found_link_never_drags_onto_a_tile_nor_has_a_channels_menu(self):
-        self.drag("Lecture recording")
-        self.right_click("Lecture recording")
+    def test_a_found_links_menu_and_drag_are_the_kept_links(self):
+        self.drag("Lecture recording")  # a film never drags out (it never plays live)
         self.assertEqual(self.events, [])
         self.assertIsNone(self.drawer.dragging())
-        # The provider's channel found beside it is a channel: it drags out, it has its menu.
+        self.right_click("Lecture recording")
+        self.drag("Lecture hall live")
+        self.right_click("Lecture hall live")
+        self.assertEqual(
+            self.seen(),
+            [
+                ("menu", LINK_LAYER, "b2", None),
+                ("drag", "item", "e5", self.live),  # never the find's plain dict
+                ("drop", "item", "e5", self.live),
+                ("menu", LINK_LAYER, "e5", None),
+            ],
+        )
+        # The menu key on it asks for the same.
+        self.events.clear()
+        for _ in range(len(self.right.nodes)):
+            if self.drawer.highlighted().title == "Lecture hall live":
+                break
+            self.drawer.move_by(1)
+        self.assertTrue(self.drawer.context_key())
+        self.assertEqual(self.seen(), [("menu", LINK_LAYER, "e5", None)])
+        # Found, but no longer kept: no menu, no drag.
+        self.events.clear()
+        del self.kept["e5"]
+        self.assertFalse(self.drawer.context_key())
+        self.right_click("Lecture hall live")
+        self.drag("Lecture hall live")
+        self.assertEqual(self.events, [])
+        # The provider's channel found beside them is a channel: it drags out, it has its menu.
         self.drag("Lecture One")
         self.right_click("Lecture One")
         self.assertEqual(
@@ -430,6 +518,28 @@ class WindowTests(WindowCase):
             self.assertEqual((item["id"], item["cmd"], section), (film.id, FILM_URL, "movies"))
             self.assertEqual(play.call_count, 2)
         elapse(QApplication.doubleClickInterval() + 80)  # no second-click guard left armed
+
+    def test_a_links_row_offers_the_kept_links_menu(self):
+        # The real list, controller and network player: the menu key on a row of Network
+        # streams opens the kept link's menu (without libVLC this window has no picture in
+        # picture: test_tv_pip has a live link's).
+        window = self.window
+        self.loaded()
+        self.keep(LIVE_URL, "Harbour News", LIVE, 2.0)
+        self.keep(FILM_URL, "Lecture recording", FILM, 1.0)
+        window.network_player.changed.emit()
+        self.show()
+        drawer = self.wait_for_drawer()
+        window.nav.open(self.links_source())
+        drawer.open_drawer()
+        self.assertEqual(drawer.highlighted().title, "Harbour News")
+        with shown_menus() as popup:
+            QTest.keyClick(window, Qt.Key.Key_Menu)
+            QTest.keyClick(window, Qt.Key.Key_Down)
+            QTest.keyClick(window, Qt.Key.Key_Menu)  # the film
+        players = ["Play in VLC", "Play in MPV", "Copy stream link"]
+        menus = [menu.texts() for menu, _where in menus_of(popup)]
+        self.assertEqual(menus, [players, players])
 
     def test_a_failed_link_says_why_in_the_list(self):
         window = self.window

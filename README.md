@@ -149,6 +149,7 @@ These are also in the app under Settings › Keys (Help → Keyboard Shortcuts o
 | <kbd>Backspace</kbd> | Previous channel |
 | <kbd>Enter</kbd> | Channel list |
 | <kbd>←</kbd> / <kbd>→</kbd> | Back / forward 10 seconds |
+| <kbd>[</kbd> / <kbd>]</kbd> | Playback speed: slower / faster |
 | <kbd>Space</kbd> | Play / pause |
 | <kbd>X</kbd> | Stop: nothing plays or streams (Space plays it again) |
 | <kbd>L</kbd> | Go live |

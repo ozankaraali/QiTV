@@ -51,6 +51,7 @@ from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from ui.small_window import (  # noqa: F401  (re-exported: the floating window's sizes)
+    CORNER_PX,
     EDGE_PX,
     HOVER_MS,
     MARGIN,
@@ -126,7 +127,7 @@ class FloatingPlayer(SmallWindow):
         surface, self._surface = self._surface, None
         if surface is not None:
             surface.removeEventFilter(self)
-        self._press, self._dragged = None, False
+        self._drop_press()
         self._reshape_due = False
         self._forget_pointer()
         return surface
@@ -159,7 +160,7 @@ class FloatingPlayer(SmallWindow):
         where = event.globalPosition().toPoint()
         kind = event.type()
         if kind == QEvent.Type.MouseButtonDblClick and event.button() == left:
-            self._press, self._dragged = None, False
+            self._drop_press()
             self.returnRequested.emit()  # a double-click: the fullscreen desktop again
         elif kind == QEvent.Type.MouseButtonPress and event.button() == left:
             self._origin = self.pos()
@@ -177,6 +178,11 @@ class FloatingPlayer(SmallWindow):
             self.hovered.emit(where)
         elif kind == QEvent.Type.MouseButtonRelease and event.button() == left:
             self._end_press()
+
+    def _edge_press(self, event: QMouseEvent) -> None:
+        """Within the band on its controls' window: as on its picture (a double-click comes
+        back)."""
+        self.picture_mouse(event)
 
 
 class DesktopPip(QObject):

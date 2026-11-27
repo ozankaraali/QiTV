@@ -61,6 +61,28 @@ from services.live.ts import ContinuityJoiner
 
 KEY = bytes(range(16))
 FAST_RETRIES = (0.01,) * 6
+# A live playlist's pace: its reloads (half a target duration, a second at least), and the
+# waits it measures against them (a stale copy's, another origin group's, a frozen one's, a
+# prefetch source's hold).
+PACE = (
+    "_RELOAD_FLOOR_S",
+    "_RELOAD_PART",
+    "_OTHER_RELOAD_S",
+    "_OTHER_COPY_S",
+    "_STALE_TARGETS",
+    "_PREFETCH_RELOAD_S",
+    "_PREFETCH_HOLD_PIECES",
+    "_FROZEN_TIMEOUT",
+)
+QUICK = 4
+
+
+def quick(factor=QUICK):
+    """The source's pace `factor` times as fast, for a test of how a live playlist's copies
+    are taken (each asked for and logged as at the real pace, in a part of the time)."""
+    return patch.multiple(
+        source_module, **{name: getattr(source_module, name) / factor for name in PACE}
+    )
 
 
 def encrypt(data, iv, key=KEY):
@@ -1094,6 +1116,7 @@ video.m3u8
         self.assertEqual(sum(server.counts[f"/a{k}.ts"] for k in range(4)), 1)
         self.assertEqual(sum("cannot take its audio" in line for line in logs.output), 1)
 
+    @quick()
     def test_a_tail_held_for_audio_its_pmt_cannot_take_goes_on_as_it_came(self):
         # The audio covered the video's first 2 s: its head, PMT and all, could not take it,
         # and the tail held for the rest goes on as it came, no audio fetched for it.
@@ -1135,6 +1158,7 @@ video.m3u8
         self.assertTrue(ts_fixtures_has_audio(second))  # the new tables took it
         self.assertEqual(server.counts["/a1.ts"], 1)
 
+    @quick()
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
             if count == 1:
@@ -1159,6 +1183,7 @@ video.m3u8
         self.assertEqual(server.counts["/live/first.ts"], 1)
         self.assertEqual(server.counts["/live/second.ts"], 1)
 
+    @quick()
     def test_a_low_latency_playlists_unfinished_segment_waits_until_it_is_listed_whole(self):
         # LL-HLS lists the segment still being made as its parts alone: no URI of its own.
         # Taken for a segment, the playlist itself was fetched in its place, a break marked
@@ -1185,6 +1210,7 @@ video.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 2)
         self.assertEqual((server.counts["/first.ts"], server.counts["/second.ts"]), (1, 1))
 
+    @quick()
     def test_a_media_sequence_gap_on_reload_marks_a_discontinuity(self):
         def playlist(_request, count):
             if count == 1:
@@ -1224,6 +1250,7 @@ video.m3u8
         parts = media(server.url + "/channel.m3u8")
         self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
 
+    @quick()
     def test_hls_retries_transient_reload_and_segment_failures(self):
         def playlist(_request, count):
             text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\na.ts\n"
@@ -1247,6 +1274,7 @@ video.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 4)
         self.assertEqual(server.counts["/b.ts"], 2)
 
+    @quick()
     def test_a_live_playlist_down_beyond_the_quick_delays_is_asked_again(self):
         quick = len(FAST_RETRIES)
 
@@ -1278,6 +1306,7 @@ video.m3u8
         self.assertEqual(len(heard), 3)  # two long waits told, then None
         self.assertIsNone(heard[-1])
 
+    @quick()
     def test_a_reload_answered_404_a_moment_is_asked_again(self):
         # 2.9: a public channel's CDN answered one 404 for its playlist: the session ended,
         # played the channel directly, and AI captions had no buffer to read.
@@ -1301,6 +1330,7 @@ video.m3u8
         self.assertEqual(parts, joined(self.video, self.next_video))
         self.assertEqual(server.counts["/live.m3u8"], 4)
 
+    @quick()
     def test_a_variant_gone_for_good_is_found_again_through_the_channels_master(self):
         # A variant's address that expired: its master names it anew.
         def master(_request, count):
@@ -1334,6 +1364,7 @@ video.m3u8
         self.assertEqual(server.counts["/channel.m3u8"], 2)
         self.assertEqual(server.counts["/v1.m3u8"], 1 + 1 + len(FAST_RETRIES))
 
+    @quick()
     def test_a_playlist_gone_without_a_master_still_fails(self):
         def playlist(_request, count):
             text = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\na.ts\n"
@@ -1475,7 +1506,8 @@ video.m3u8
                 with self.tls_context() as context:
                     server = self.server({"/user/secret.ts": (status, {}, b"")}, tls=context)
                     plain = server.url.replace("https://", "http://", 1) + "/user/secret.ts"
-                    with insecure(), self.assertRaises(SourceError):
+                    quick_retries = patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES)
+                    with insecure(), quick_retries, self.assertRaises(SourceError):
                         open_source(
                             plain,
                             headers={},
@@ -2820,6 +2852,7 @@ video.m3u8
         # (the segment fetched, its EXTINF, the EXTINF of the listed ones after it)
         self.assertEqual(seen, [(1, 2.0, 4.0), (2, 2.0, 2.0), (3, 2.0, 0.0), (3, 0.0, 0.0)])
 
+    @quick()
     def test_live_hls_says_when_it_delivered_every_listed_segment(self):
         # The helper reports its live edge on it: the end of a batch is otherwise reported
         # only with the next one (its state messages are throttled to four a second).
@@ -2837,6 +2870,7 @@ video.m3u8
         self.assertIsInstance(parts[1], CaughtUp)  # right after a.ts and b.ts
         self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
 
+    @quick()
     def test_a_reload_that_brings_the_same_copy_is_not_parsed_again(self):  # 2.8
         # A long DVR window's parse takes tens of ms; about half the reloads bring nothing new.
         same = hls(0, ["a.ts", "b.ts"])
@@ -2860,6 +2894,7 @@ video.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 4)
         self.assertEqual(len(loads), 2)  # the first copy and the new one
 
+    @quick()
     def test_a_resumed_run_goes_on_after_the_run_it_joins(self):  # 2.8: no replay
         # A rewound viewer's kept buffer taken back (a new picture size, a quick zap back):
         # the new run starts after the old run's last whole segment when its playlist still
@@ -2880,6 +2915,7 @@ video.m3u8
                 media(server.url + "/live.m3u8", live_delay=3.0, after_seq=after)
                 self.assertEqual(requested_segments(server)[0], first)
 
+    @quick()
     def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
         # New names numbered back: believed once its copies persist as long as a stale copy is
         # waited out (2.6.1: another origin group's copy looks alike, and a reload soon answers
@@ -2889,7 +2925,7 @@ video.m3u8
             "new segment names": (
                 [
                     hls(100, ["s100.ts", "s101.ts", "s102.ts"]),
-                    *[restarted] * 4,  # three target durations: 1 s each here
+                    *[restarted] * 4,  # three target durations: a reload each here
                     hls(1, ["r1.ts", "r2.ts", "r3.ts"], ended=True),
                 ],
                 ["s102.ts", "r2.ts", "r3.ts"],
@@ -2926,6 +2962,7 @@ video.m3u8
                 requested = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
                 self.assertEqual(requested, fetched)
 
+    @quick(2)  # a stale copy within three targets: a second's slack under load
     def test_a_stale_playlist_copy_is_waited_out(self):
         # The second copy lags behind and overlaps: an older copy from a lagging CDN node.
         shapes = [(10, "abc", False), (9, "zab", False), (11, "bcd", True)]
@@ -2957,6 +2994,7 @@ video.m3u8
                 self.assertEqual(requested_segments(server), ["a.ts", "b.ts", "c.ts", "d.ts"])
                 self.assertEqual(server.counts["/live.m3u8"], 3)
 
+    @quick()
     def test_an_empty_playlist_copy_is_waited_out(self):
         window = [f"w{number}.ts" for number in range(10)]
 
@@ -3132,6 +3170,41 @@ video.m3u8
         self.assertLess(time.monotonic() - began, 5.0)
         self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(4)])
 
+    def test_a_recording_part_is_paced_by_its_stop_ahead_from_its_stop_on(self):
+        # 2.15, AI captions: fetched far ahead (its `ahead_s`) up to its stop, and from there
+        # by `stop_ahead_s`, so its input ends no sooner than before (its join's room).
+        names = [f"r{n}.ts" for n in range(8)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/rec.m3u8"] = (200, {}, self.recording(names))
+        server = self.server(routes)
+        asked = []
+
+        def hold(ahead=None):
+            asked.append((len(requested_segments(server)), ahead))
+            return False
+
+        window = {
+            "from_s": 0.0,
+            "stop_s": 999.0,
+            "stop_date": DAY.timestamp() + 30.0,
+            "late_s": 30.0,
+            "stop_ahead_s": 60.0,
+        }
+        source = open_source(
+            server.url + "/rec.m3u8",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            live_delay=1.0,
+            window=window,
+            hold=hold,
+        )
+        drain(source)
+        self.assertEqual(requested_segments(server), [f"r{n}.ts" for n in range(6)])
+        # before r0-r2 its own pace; before r3-r5 (from the stop at 30 s on) a minute's
+        self.assertEqual([ahead for _count, ahead in asked], [None] * 3 + [60.0] * 3)
+        self.assertEqual([count for count, _ahead in asked], list(range(6)))
+
     def test_a_recording_part_waiting_at_its_listings_end_reads_it_again_sooner(self):
         # Brief 2, 8: once all it lists is fetched short of its stop, its listing is read again
         # every 10 s (not Kick's 30 s step), one ask at a time.
@@ -3175,6 +3248,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), ["r0.ts", "r1.ts", "r2.ts", "r3.ts"])
         self.assertGreaterEqual(server.counts["/rec.m3u8"], 2)
 
+    @quick()
     def test_a_server_part_whose_start_left_the_window_goes_on_from_its_oldest(self):
         # Review Focus 2: near the window's oldest end the window slides past the next
         # segment; the part goes on from the window's oldest, not from the live end.
@@ -3191,6 +3265,7 @@ video.m3u8
         fetched = ["s100.ts", "s101.ts", "s105.ts", "s106.ts", "s107.ts"]
         self.assertEqual(requested_segments(server), fetched)  # a live source: s107 only
 
+    @quick()
     def test_a_server_part_on_another_groups_copy_asks_again(self):
         # Review Focus 1: the first copy numbers another encoding (no 108 in its window): it
         # is asked for again, and the part stops before 108 in ours.
@@ -3470,6 +3545,7 @@ video.m3u8
             finally:
                 source.close()
 
+    @quick(2)  # two of its copies set aside: a second's slack under load
     def test_a_copy_from_another_origin_group_is_set_aside(self):
         # Two origin groups behind one address, each numbering and naming its own encoding
         # (measured 2.6.1, a 24 h public playlist): the other group's copy is neither a stale
@@ -3499,6 +3575,7 @@ video.m3u8
                 self.assertEqual(parts, joined(self.video, self.next_video, self.video))
                 self.assertEqual(requested_segments(server), ["c.ts", "d.ts", "e.ts"])
 
+    @quick()
     def test_another_groups_copy_is_asked_again_on_a_new_connection(self):
         # A load balancer that pins a connection to one origin group (measured 2.6.1): the
         # kept-alive connection went on answering the other group's copies, so the playlist
@@ -3548,6 +3625,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), ["c.ts", "z.ts"])
         self.assertGreaterEqual(server.counts["/live.m3u8"], 5)  # it waited 3 s for ours
 
+    @quick()
     def test_falling_behind_the_window_resumes_at_the_live_start(self):
         def playlist(_request, count):
             if count == 1:
@@ -3568,6 +3646,7 @@ video.m3u8
         self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video, self.video))
         self.assertEqual(requested_segments(server), ["s10.ts", "s16.ts", "s17.ts"])
 
+    @quick()
     def test_a_stalled_segment_is_skipped_while_the_playlist_advances(self):
         release = threading.Event()
         head = self.video[: 188 * 100]
@@ -3599,6 +3678,7 @@ video.m3u8
             parts, joined(self.video, head, Discontinuity(), self.next_video, self.video)
         )
 
+    @quick()
     def test_a_segment_that_stalls_after_data_is_skipped_at_the_stall_timeout(self):
         release = threading.Event()
         head = self.video[: 188 * 100]
@@ -3831,6 +3911,7 @@ video.m3u8
                 elif accepted:  # an alternate rendition
                     self.assertTrue(any("French" in line for line in logs), logs)
 
+    @quick()
     def test_the_user_agent_and_referer_reach_every_origin_and_no_other_header_does(self):
         # 2.1: an M3U channel's http-referrer goes with its playlists and segments alike,
         # wherever they are (a CDN's hotlink check reads it), as VLC sends it.
@@ -3868,6 +3949,7 @@ video.m3u8
             for _path, received in server.requests:
                 self.assertEqual(received.get("Referer"), "http://portal.invalid/")
 
+    @quick()
     def test_keep_alive_connections_are_reused_for_reloads_and_segments(self):
         def playlist(_request, count):
             return 200, {}, hls(0, ["a.ts"]) if count == 1 else hls(0, ["a.ts", "b.ts"], ended=True)
@@ -4138,6 +4220,7 @@ video.m3u8
         self.assertIsNotNone(first)
         self.assertLess(first, ended[0] - 0.6)  # before the last two quarters were sent
 
+    @quick()
     def test_a_prefetch_piece_relisted_finished_is_not_fetched_again(self):
         names = [f"s{number}.ts" for number in range(6)]
         copies = [
@@ -4271,6 +4354,7 @@ video.m3u8
                 if before:  # s5..s7 (Stable's 6 s): 2 s each, nothing counted for p8 and p9
                     self.assertEqual(rest[0], (5, 4.0))
 
+    @quick()
     def test_a_prefetch_piece_that_breaks_is_skipped_once(self):
         # Missing, or cut off after its first bytes: skipped with a marker, never asked again
         # (its sequence is passed once a later copy lists it finished), and the next one comes.
@@ -4300,6 +4384,7 @@ video.m3u8
                 self.assertIsInstance(parts[-2], Discontinuity)  # before p8 and p9
                 self.assertEqual(plain(parts[-1]), plain(self.video * 2))
 
+    @quick()
     def test_a_prefetch_source_reports_no_burst(self):
         # Its pieces come as they are made, not a target duration at a time: no burst, from
         # the first state on and after reloads; without prefetch pieces, as before.
@@ -4463,6 +4548,7 @@ video.m3u8
                 expected = [False, True, True, False, True, False, False, True, False, titled]
                 self.assertEqual(found, expected)
 
+    @quick()
     def test_marked_ad_pieces_are_skipped_with_a_marker(self):
         # Three pieces of an ad break between live ones: never asked for, one discontinuity
         # where the channel goes on, and the break said as it begins and as it ends. Marked by
@@ -4548,6 +4634,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), [])
         self.assertEqual(len([line for line in logs if "only ad pieces" in line]), 1)
 
+    @quick()
     def test_prefetch_pieces_inside_a_break_are_skipped(self):
         # Pieces still being made, dated (from the last finished piece's date on) inside an ad
         # break's range, are never asked for: neither as they are made nor once finished. The
@@ -4570,11 +4657,12 @@ video.m3u8
         self.assertEqual(requested_segments(server), finished + ["p5.ts", "p6.ts"])
         self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()])
 
+    @quick()
     def test_a_pre_roll_at_tune_in_waits(self):
         # A tune into an ad break: the playlist lists only its pieces, the same copy for longer
-        # than a frozen playlist is given (60 s; here 1 s), and the source waits for the
-        # channel without failing; its first piece plays once it comes (no marker before the
-        # first bytes: nothing played before them).
+        # than a frozen playlist is given (60 s; here a quarter second), and the source waits
+        # for the channel without failing; its first piece plays once it comes (no marker before
+        # the first bytes: nothing played before them).
         AdBreak = source_module.AdBreak
         ads = {"a0.ts", "a1.ts", "a2.ts"}
         pre = dated(0, sorted(ads), ads=ads, ranges={"a0.ts": ad_range(0, 3)})
@@ -4586,7 +4674,7 @@ video.m3u8
             dated(2, ["a2.ts", "s3.ts", "s4.ts"], ads=ads),
         ]
         server = self.copies(copies, sorted(ads) + ["s3.ts", "s4.ts"])
-        with patch.object(source_module, "_FROZEN_TIMEOUT", 1.0):
+        with patch.object(source_module, "_FROZEN_TIMEOUT", 1.0 / QUICK):  # at the quick pace
             items = self.until(server, "s4.ts")
         self.assertEqual(requested_segments(server), ["s3.ts", "s4.ts"])
         self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False)])
@@ -4716,6 +4804,7 @@ video.m3u8
         parts = self.run_for(server, 0.5, live_delay=100.0)
         self.assertEqual(parts, joined(self.video, Discontinuity(), self.video, self.video))
 
+    @quick()
     def test_twitch_pieces_being_made_after_a_cut_from_the_channel_are_an_ad_breaks(self):
         # Final review I2: a Twitch copy lists the channel's pieces, a discontinuity, and two
         # pieces still being made before any range dates them (their dates are only reckoned):
@@ -4742,6 +4831,7 @@ video.m3u8
         self.assertEqual(requested_segments(server), finished + ["p5.ts", "p6.ts"])
         self.assertEqual(self.markers(items), [AdBreak(True), AdBreak(False), Discontinuity()])
 
+    @quick()
     def test_twitch_ad_pieces_relisted_under_other_names_are_the_ones_skipped(self):
         # I2's break, its pieces being made listed finished in the next copy under other names
         # (2026-11-25: as Twitch relists the channel's own): the pieces already skipped, not

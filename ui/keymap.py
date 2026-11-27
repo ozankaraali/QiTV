@@ -7,7 +7,7 @@ import sys
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QKeyEvent, QKeySequence
 
 from services.i18n import N_, tr
 
@@ -72,6 +72,9 @@ class Action(str, Enum):
     STOP = "stop"  # X, ■: every picture stops and nothing streams; Space plays it again (2.6)
     # 2.13.1: the menu key or Shift+F10: the highlighted row's menu, as its right-click opens it
     CONTEXT_MENU = "context_menu"
+    # [ and ]: the speed chip's − and + (VLC's and mpv's keys; S swaps the pictures here)
+    SLOWER = "slower"
+    FASTER = "faster"
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
@@ -132,6 +135,19 @@ _PLAYER_CHARS = {
     _K.Key_R.value: Action.RECORD,
     _K.Key_A.value: Action.PICTURE,  # VLC's aspect key: the panel opens on the aspect ratio
     _K.Key_X.value: Action.STOP,
+    _K.Key_BracketLeft.value: Action.SLOWER,
+    _K.Key_BracketRight.value: Action.FASTER,
+}
+# [ and ] by the text they type too: on a Mac's Turkish keyboard they are ⌥8 and ⌥9, on Windows
+# often AltGr (Ctrl+Alt); ⌘[ and ⌘] (Ctrl elsewhere) stay shortcuts.
+_SPEED_TEXT = {"[": Action.SLOWER, "]": Action.FASTER}
+# And by their place: the keys where an English keyboard has [ and ] (a Turkish one's ğ and ü),
+# when what they type means nothing else (a German keyboard's + there stays the volume). A Mac's
+# key codes; scan codes elsewhere (X's and Wayland's are the kernel's plus 8).
+_SPEED_PLACES = {
+    "darwin": {0x21: Action.SLOWER, 0x1E: Action.FASTER},
+    "win": {0x1A: Action.SLOWER, 0x1B: Action.FASTER},
+    "linux": {34: Action.SLOWER, 35: Action.FASTER},
 }
 # With Shift, the sound's sync keys move the subtitles, and I (the channel's info) shows the
 # picture's statistics (the player only).
@@ -180,6 +196,8 @@ _GUIDE_CHARS = {
         _K.Key_Plus.value,
         _K.Key_Equal.value,
         _K.Key_Minus.value,
+        _K.Key_BracketLeft.value,
+        _K.Key_BracketRight.value,
     )
 }
 # The Library (spec §5.4): the drawer's keys plus Home/End. It types like the drawer, so "/"
@@ -214,12 +232,13 @@ def resolve(
     context: str | None = None,
     drawer_open: bool | None = None,
     platform: str = sys.platform,
+    place: int = 0,
 ) -> tuple[Action, str] | None:
     """Map a key press to (action, payload); the payload is the digit or the typed text.
 
     `context` is "player", "drawer", "library", "guide" or "subtitles". `drawer_open` is the
     older spelling (True means "drawer", False "player") and is used only when `context`
-    is not given.
+    is not given. `place` is where the key sits (`key_place`), 0 when nobody knows.
     """
     if context is None:
         context = "drawer" if drawer_open else "player"
@@ -274,6 +293,8 @@ def resolve(
         return keys[key], ""
     if key in _CHANNEL_KEYS:
         return _CHANNEL_KEYS[key], ""
+    if text in _SPEED_TEXT and _text(text, mods, windows=platform.startswith("win")):
+        return _SPEED_TEXT[text], ""  # whatever produced it but ⌘/Ctrl or Meta (AltGr types)
     if held:
         return None
     if _K.Key_0.value <= key <= _K.Key_9.value:
@@ -284,7 +305,15 @@ def resolve(
         return _PLAYER_SHIFT_CHARS[key], ""
     if key in chars:
         return chars[key], ""
+    for prefix, places in _SPEED_PLACES.items():
+        if place and platform.startswith(prefix) and place in places:
+            return places[place], ""
     return None
+
+
+def key_place(event: QKeyEvent, platform: str = sys.platform) -> int:
+    """Where a pressed key sits on the keyboard, whatever it types (`resolve`'s `place`)."""
+    return int(event.nativeVirtualKey() if platform == "darwin" else event.nativeScanCode())
 
 
 def _caret_mods(key: int, mods: int, platform: str) -> str:
@@ -340,6 +369,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Backspace", N_("Previous channel")),
         ("Return", N_("Channel list")),
         ("Left, Right", N_("Back / forward 10 seconds")),
+        # i18n: what [ and ] do: the speed chip's − and + (0.5x … 3x)
+        ("[, ]", N_("Playback speed: slower / faster")),
         ("Space", N_("Play / pause")),
         ("X", N_("Stop: nothing plays or streams (Space plays it again)")),
         ("L", N_("Go live")),

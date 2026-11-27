@@ -6,7 +6,8 @@ The owner (2.13.5): "fullscreen switch pip and regular pip are not the same, one
 other does not have". Asked for (Alt+P, the controls' button, View > Mini Player), the small
 window should be the window: its picture's clicks, drags (they move it), double-clicks,
 right-clicks and keys are the TV window's (`MiniWindow`). Its own, as the desktop picture in
-picture's (ui/small_window.py): its edges resize it in its picture's shape, and the wheel over
+picture's (ui/small_window.py): its edges resize it in its picture's shape (over the window's
+controls too: the TV window has it `guard` their overlay host), and the wheel over
 the picture does nothing (a scroll drifting over it from another app). It shows without taking
 the focus; a press on it brings QiTV forward (the TV window's to arrange). What is dropped on it
 goes to the TV window, and so does a close (the system's Quit reaches only the windows shown).
@@ -95,7 +96,7 @@ class MiniWindow(SmallWindow):
                 watched.setMouseTracking(tracking)  # as it was in the window
         self._watched = {}
         self._forget_pointer()
-        self._press, self._dragged = None, False
+        self._drop_press()
         self._reshape_due = False
         return held
 

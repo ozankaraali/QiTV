@@ -195,6 +195,10 @@ _HELD_RELOAD_S = 30.0
 # out (measured: such a group answered every request for up to 14 s), at least this.
 _OTHER_COPY_S = 4.0
 _OTHER_RELOAD_S = 1.0
+# A live playlist is read again this part of its target duration after its last reload began,
+# this long at least.
+_RELOAD_PART = 0.5
+_RELOAD_FLOOR_S = 1.0
 _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 # Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
@@ -1837,7 +1841,7 @@ class HlsSource:
         separate_audio: str | None = None,
         capture: _Capture | None = None,
         window: Mapping[str, Any] | None = None,
-        hold: Callable[[], bool] | None = None,
+        hold: Callable[..., bool] | None = None,
         heights: tuple[int, ...] = (),
         height: int = 0,
         max_height: int = 0,
@@ -1860,8 +1864,10 @@ class HlsSource:
         that begins at or after `stop_date` (its PROGRAM-DATE-TIME, Unix seconds; an undated
         piece: at `stop_s` of its listing), a piece's edge; `grows`: its listing goes on
         though it says it ends (Kick's says ENDLIST while it grows), read again every
-        `reload_s` until its stop. `heights` and `height` (2.8): its master's picture sizes and the
-        variant's; `max_height`: the cap it was chosen under, which a reload's keeps.
+        `reload_s` until its stop; `stop_ahead_s`: from its stop on, `hold` is asked with that
+        many seconds (its pacing there, `_paced`). `heights` and `height` (2.8): its master's
+        picture sizes and the variant's; `max_height`: the cap it was chosen under, which a
+        reload's keeps.
         `after_seq` (2.8): a resumed run's start goes on after that media sequence (the run it
         joins, `_start`). `copy`: the bytes `playlist` was parsed from, when its address
         answered with it (a reload's same copy is not parsed again, `_reloaded`)."""
@@ -1889,6 +1895,7 @@ class HlsSource:
         self._listing_wait = 0.0  # 2.15: it waits at its listing's end (the reload's wait)
         self._grows = bool(window.get("grows")) if recording and window else False
         self._reload_s = _seconds(window.get("reload_s")) if recording and window else None
+        self._stop_ahead = _seconds(window.get("stop_ahead_s")) if recording and window else None
         self._part_start: float | None = None  # its first piece's place in its listing (s)
         self._part_date: float | None = None  # ... and that piece's date (None: undated)
         self._listed = 0.0  # how much its listing lists, as last read (s)
@@ -2272,6 +2279,16 @@ class HlsSource:
         """A recording part's piece that begins at or after its stop and `late_s` more."""
         return self._beyond(segment, at, True, False)
 
+    def _paced(self, segment: Any, at: float) -> bool:
+        """`hold` for the piece at place `at` (asked again as it waits: its stop may move).
+        2.15: a recording part fetched far ahead for AI captions keeps `stop_ahead_s` from its
+        stop on, so its input ends no sooner than it did: its join's room in the buffer
+        (`late_s`) stays more than that, as the buffer's start moves on."""
+        assert self._hold is not None
+        if self._stop_ahead is not None and self._beyond(segment, at, False, False):
+            return self._hold(self._stop_ahead)
+        return self._hold()
+
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1).
 
@@ -2467,7 +2484,7 @@ class HlsSource:
                     done = True  # 2.15: its stop, a piece's edge (no hold: nothing is fetched)
                     break
                 held = time.monotonic()
-                while self._hold is not None and self._hold():  # its stop may move meanwhile
+                while self._hold is not None and self._paced(segment, at):  # (its stop may move)
                     if http.wait(_HOLD_POLL_S):
                         raise _Closed()
                 if time.monotonic() - held > max(
@@ -2521,7 +2538,7 @@ class HlsSource:
                 yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
-            interval = max(1.0, float(playlist.target_duration or 0) / 2)
+            interval = max(_RELOAD_FLOOR_S, _RELOAD_PART * float(playlist.target_duration or 0))
             if self._prefetching:
                 interval = _PREFETCH_RELOAD_S
             elif self._recording and self._grows and self._reload_s:

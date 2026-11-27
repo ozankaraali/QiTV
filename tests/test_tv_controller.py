@@ -52,7 +52,7 @@ from ui.overlays.next_card import NextCard
 from ui.overlays.popup_menu import ABOVE
 from ui.overlays.settings_drawer import SettingsDrawer
 from ui.overlays.toast import Toast
-from ui.overlays.transport import Transport
+from ui.overlays.transport import SPEEDS, Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
 from ui.settings_controller import SettingsController
@@ -526,6 +526,15 @@ class FakeDrawer(FakeOverlay):
     def finding(self):
         return self.found
 
+    # Network streams' rows (its list's and the find's) as the real list tells them, of the
+    # links the controller hands it (`set_link_item`)
+    _link_item = staticmethod(lambda key: None)
+    link_key = Drawer.link_key
+    kept_link = Drawer.kept_link
+
+    def set_link_item(self, item_of):
+        self._link_item = item_of
+
     focus_item = None  # the channel the list opened on (its row as its ▶ tells)
 
     def open_drawer(self, focus_key=None, focus_side="right", focus_item=None):
@@ -688,6 +697,7 @@ class FakeTransport(FakeOverlay):
 
     def update_timeline(self, state, ticks):
         self.record("update_timeline", state, ticks)
+        self.speed = 1.0 if state.get("mode") == "live" else state.get("rate", 1.0)
 
     def update_position(self, position, length):
         self.record("update_position", position, length)
@@ -697,6 +707,21 @@ class FakeTransport(FakeOverlay):
 
     def set_speed(self, rate):
         self.record("set_speed", rate)
+
+    speed_buttons = True  # what plays has a chosen speed (speed_steps)
+    speed = 1.0  # the chip's, as update_timeline and step_speed leave it (Transport's rule)
+
+    def speed_steps(self):
+        return self.speed_buttons
+
+    def step_speed(self, step, control=""):
+        self.record("step_speed", step)
+        if self.speed_buttons:
+            index = min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - self.speed)) + step
+            if 0 <= index < len(SPEEDS):
+                self.speed = SPEEDS[index]
+                self.speedRequested.emit(self.speed)
+        return self.speed_buttons
 
     def poke(self):
         self.record("poke")
@@ -2079,6 +2104,28 @@ class VodTests(ControllerTestCase):
         self.assertEqual(self.session.toggles, toggles + 1)
         self.assertFalse(self.drawer.visible)
         self.assertIn(("poke",), self.transport.calls)
+
+    def test_the_speed_keys_are_the_speed_chips_minus_and_plus(self):
+        # [ and ] step as − and + do (Transport.step_speed) and the controls show, so the chip
+        # reads the speed; where the row has no − and + (the live edge, a song), nothing shows.
+        # They show first: a channel's come back with its last timeline, the rate before.
+        self.play_movie()
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.transport.dismiss()
+        self.transport.calls.clear()
+        self.controller.handle(Action.FASTER)
+        self.controller.handle(Action.SLOWER)
+        calls = [c for c in self.transport.calls if c[0] in ("poke", "step_speed")]
+        self.assertEqual(calls, [("poke",), ("step_speed", 1), ("poke",), ("step_speed", -1)])
+        self.transport.speed_buttons = False
+        self.transport.calls.clear()
+        self.controller.handle(Action.FASTER)
+        self.assertEqual(self.transport.calls, [])
+        self.controller.stop()  # nothing plays: no controls to click
+        self.transport.speed_buttons = True
+        self.transport.calls.clear()
+        self.controller.handle(Action.SLOWER)
+        self.assertEqual(self.transport.calls, [])
 
     def test_a_right_click_on_the_picture_offers_what_plays(self):  # 2.9.3
         self.play_movie()
@@ -4195,6 +4242,19 @@ class PipelineControlTests(PipelineCase):
             [("seek_relative", -10.0), ("seek_relative", 10.0), ("go_live",), ("toggle_pause",)],
         )
         self.assertEqual((self.session.relative, self.session.toggles), ([], 0))
+
+    def test_a_speed_key_with_the_controls_faded_keeps_its_step(self):
+        # The channel's controls come back with its last timeline, whose rate is the one
+        # before the step: they show first, so ] reads 1.25x and is not put back to 1x.
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))  # behind live, at 1x
+        self.transport.dismiss()
+        self.controller.handle(Action.FASTER)
+        self.assertIn(("show_timeshift", "One", ""), self.transport.calls)
+        self.assertEqual(self.transport.speed, 1.25)
+        self.assertEqual(self.live.calls[-1], ("set_speed", 1.25))
+        self.controller.handle(Action.FASTER)  # the controls show: from 1.25x
+        self.assertEqual((self.transport.speed, self.live.calls[-1]), (1.5, ("set_speed", 1.5)))
 
     def test_transport_requests_reach_the_live_session(self):
         self.start_pipeline(0)

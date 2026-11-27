@@ -191,9 +191,7 @@ TOOLTIPS = {
     "external": N_("Open in external player"),  # i18n: tooltip; VLC or MPV
     "cast": N_("Cast to a TV"),  # i18n: tooltip (2.8): send the picture to a Chromecast
     "volume": N_("Volume (+/−, M)"),  # i18n: tooltip; +, − and M are its keys
-    "slower": N_("Slower"),  # i18n: tooltip of the playback speed's − button
     "speed": N_("Normal speed"),  # i18n: tooltip of the playback speed chip (back to 1x)
-    "faster": N_("Faster"),  # i18n: tooltip of the playback speed's + button
     # i18n: tooltip of ⏮ on the time-shift bar: back to the start of the programme on now
     "start": N_("Programme start"),
     "fwd60": N_("Forward 60 seconds"),  # i18n: tooltip of the time-shift bar's +60 button
@@ -244,6 +242,8 @@ KEY_HINTS = {
     # i18n: tooltip of the Picture button (its panel: aspect ratio, sleep timer
     # and statistics)
     "picture": (N_("Picture, sleep timer and statistics"), "A"),
+    "slower": (N_("Slower"), "["),  # i18n: tooltip of the playback speed's − button
+    "faster": (N_("Faster"), "]"),  # i18n: tooltip of the playback speed's + button
 }
 FAVORITE_KEY = "Ctrl+D"
 GRID_KEY = "V"  # the multiview: its grid, or back to one picture
@@ -505,7 +505,7 @@ class Transport(Overlay):
     stopRequested = Signal()  # 2.6: ■, every picture stops and nothing streams
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
-    speedRequested = Signal(float)
+    speedRequested = Signal(float, str)  # the rate, and the control it came from (2.15: logged)
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
@@ -602,6 +602,7 @@ class Transport(Overlay):
         self._failed = False  # a live channel that failed to open (show_failed)
         self._quality = False  # 2.8: its server offers versions or conversions: ⚙ shows
         self._held = ""  # the button whose panel is open: no fade meanwhile, and it is lit
+        self._stay = False  # no fade meanwhile either (`stay_up`)
         self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
@@ -1144,6 +1145,15 @@ class Transport(Overlay):
         """The button whose panel is open ("": none)."""
         return self._held
 
+    def stay_up(self, on: bool) -> None:
+        """No fade while `on`: a resize of the small window it is over, begun on its edge
+        (ui/small_window.py); off, the fade starts again. Hidden, it stays hidden."""
+        self._stay = on
+        if on:
+            self._idle.stop()
+        elif self.isVisible():
+            self._fade_later()
+
     def add_mirror(self, mirror: "Transport") -> None:
         """`mirror` (the player controls over another window: the desktop picture in picture's,
         ui/float_controls.py) shows what this one does from now on: what was said so far (each
@@ -1176,7 +1186,7 @@ class Transport(Overlay):
             self.poke()
 
     def _fade_later(self) -> None:
-        if not self._held and not self._audio:
+        if not self._held and not self._audio and not self._stay:
             self._idle.start()
 
     def dismiss(self) -> None:
@@ -2779,12 +2789,10 @@ class Transport(Overlay):
             elif name == "next":
                 self.nextRequested.emit()
             elif name in ("slower", "faster"):
-                index = self._nearest_speed() + (1 if name == "faster" else -1)
-                if 0 <= index < len(SPEEDS):
-                    self._choose_speed(SPEEDS[index])
+                self.step_speed(1 if name == "faster" else -1, "the chip's " + name)
             elif name == "speed":
                 if self._speed != 1.0:
-                    self._choose_speed(1.0)
+                    self._choose_speed(1.0, "the chip's 1x")
             elif name == "fullscreen":
                 self.fullscreenRequested.emit()
             elif name == "audio":
@@ -2839,10 +2847,28 @@ class Transport(Overlay):
                 self.moreRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return
 
-    def _choose_speed(self, rate: float) -> None:
+    def speed_steps(self) -> bool:
+        """What plays has a chosen speed: the bar's row, whose speed chip has its − and +
+        where they fit (a film, a channel behind live); not the live edge, live TV without
+        time-shift or the audio dock. Whatever the width: in a row too small for − and +
+        (the mini player's) [ and ] still step it, and the chip reads it where it shows."""
+        return not self._audio and self._shows_bar()
+
+    def step_speed(self, step: int, control: str = "") -> bool:
+        """The speed chip's − (`step` -1) or + (1), clicked or [ and ] pressed: the next of
+        SPEEDS, nothing past either end; `control` names what asked (logged). False, and
+        nothing changes, without a chosen speed (`speed_steps`)."""
+        if not self.speed_steps():
+            return False
+        index = self._nearest_speed() + (1 if step > 0 else -1)
+        if 0 <= index < len(SPEEDS):
+            self._choose_speed(SPEEDS[index], control)
+        return True
+
+    def _choose_speed(self, rate: float, control: str) -> None:
         self._speed = rate
         self.update()
-        self.speedRequested.emit(rate)
+        self.speedRequested.emit(rate, control)
 
     def _nearest_speed(self) -> int:
         return min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - self._speed))

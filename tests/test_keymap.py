@@ -186,6 +186,101 @@ class ClosedKeymapTests(unittest.TestCase):
         self.assertEqual(closed(K.Key_X, "x"), (Action.STOP, ""))
         self.assertEqual(guide(K.Key_X, "x"), (Action.STOP, ""))
 
+    def test_brackets_step_the_speed_on_the_player_and_in_the_guide(self):
+        # [ and ] are the speed chip's − and + (VLC's and mpv's keys); the lists type them.
+        for context in ("player", "guide"):
+            for key, text, action in (
+                (K.Key_BracketLeft, "[", Action.SLOWER),
+                (K.Key_BracketRight, "]", Action.FASTER),
+            ):
+                with self.subTest(context=context, text=text):
+                    self.assertEqual(resolve(key.value, NONE, text, context=context), (action, ""))
+                    self.assertEqual(resolve(key.value, NONE, "", context=context), (action, ""))
+        for context in ("drawer", "library", "subtitles"):
+            self.assertEqual(
+                resolve(K.Key_BracketLeft.value, NONE, "[", context=context), (Action.NAV_TEXT, "[")
+            )
+
+    def test_brackets_typed_with_option_or_altgr_step_the_speed(self):
+        # The owner's Turkish keyboard: on a Mac [ and ] are ⌥8 and ⌥9 (Qt may name the key
+        # 8 or [), on Windows AltGr+8 and AltGr+9 (Ctrl+Alt there); the text is what counts.
+        for platform, mods in (("darwin", ALT), ("win32", CTRL | ALT), ("linux", ALT)):
+            for key, text, action in (
+                (K.Key_8, "[", Action.SLOWER),
+                (K.Key_9, "]", Action.FASTER),
+                (K.Key_BracketLeft, "[", Action.SLOWER),
+                (K.Key_BracketRight, "]", Action.FASTER),
+            ):
+                with self.subTest(platform=platform, key=key, text=text):
+                    self.assertEqual(
+                        resolve(key.value, mods, text, context="player", platform=platform),
+                        (action, ""),
+                    )
+        self.assertEqual(  # ⌥8 is not the digit 8
+            resolve(K.Key_8.value, ALT, "[", context="guide", platform="darwin"),
+            (Action.SLOWER, ""),
+        )
+
+    def test_cmd_and_ctrl_brackets_stay_shortcuts(self):
+        # ⌘[ and ⌘] (Ctrl elsewhere), ⌘⌥ and Ctrl+Alt outside Windows, the Mac's Control: never
+        # the speed, whatever text the platform gives them.
+        cases = [
+            (platform, mods, key, text)
+            for platform in ("darwin", "win32", "linux")
+            for mods in (CTRL, META, CTRL | SHIFT)
+            for key, text in ((K.Key_BracketLeft, "["), (K.Key_BracketRight, "]"))
+        ]
+        cases += [(p, CTRL | ALT, K.Key_8, "[") for p in ("darwin", "linux")]
+        cases += [
+            ("win32", CTRL, K.Key_BracketLeft, "\x1b"),
+            ("win32", CTRL | ALT | META, K.Key_8, "["),
+        ]
+        for platform, mods, key, text in cases:
+            with self.subTest(platform=platform, mods=mods, key=key, text=text):
+                self.assertIsNone(
+                    resolve(key.value, mods, text, context="player", platform=platform)
+                )
+                self.assertIsNone(resolve(key.value, mods, "", context="player", platform=platform))
+
+    def test_the_keys_where_the_brackets_sit_step_the_speed(self):
+        # The owner's Turkish keyboard has ğ and ü where an English one has [ and ]: the key's
+        # place counts too (a Mac's key code, the scan code elsewhere), after what its letter
+        # means, so a German keyboard's + there stays the volume.
+        gbreve, udiaeresis = 0x011E, K.Key_Udiaeresis.value  # Qt names ğ by its capital
+        for platform, left, right in (
+            ("darwin", 0x21, 0x1E),
+            ("win32", 0x1A, 0x1B),
+            ("linux", 34, 35),
+        ):
+            for context in ("player", "guide"):
+                with self.subTest(platform=platform, context=context):
+                    for key, mods, text, place, action in (
+                        (gbreve, NONE, "ğ", left, Action.SLOWER),
+                        (udiaeresis, NONE, "ü", right, Action.FASTER),
+                        (udiaeresis, SHIFT, "Ü", right, Action.FASTER),
+                    ):
+                        found = resolve(
+                            key, mods, text, context=context, platform=platform, place=place
+                        )
+                        self.assertEqual(found, (action, ""))
+                    plus = resolve(
+                        K.Key_Plus.value, NONE, "+", context=context, platform=platform, place=right
+                    )
+                    self.assertEqual(plus, (Action.VOL_UP, ""))
+            with self.subTest(platform=platform, what="not ours"):
+                for mods in (CTRL, ALT, META, CTRL | ALT):
+                    self.assertIsNone(
+                        resolve(gbreve, mods, "ğ", context="player", platform=platform, place=left)
+                    )
+                self.assertEqual(  # the lists type the letter
+                    resolve(gbreve, NONE, "ğ", context="drawer", platform=platform, place=left),
+                    (Action.NAV_TEXT, "ğ"),
+                )
+        # Another platform's code is no place, and neither is none (the phone remote's keys).
+        elsewhere = resolve(gbreve, NONE, "ğ", context="player", platform="darwin", place=0x1A)
+        self.assertIsNone(elsewhere)
+        self.assertIsNone(resolve(gbreve, NONE, "ğ", context="player", platform="darwin"))
+
 
 class AsIntTests(unittest.TestCase):
     def test_accepts_enums_ints_and_none(self):

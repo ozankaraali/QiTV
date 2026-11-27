@@ -7,7 +7,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QRect, QSize, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QDragEnterEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
@@ -16,8 +16,14 @@ from timer_fixtures import elapse, wait_until  # noqa: E402
 from services import picture  # noqa: E402
 from services.catalog import ALL_GROUP_ID  # noqa: E402
 from tests.test_desktop_pip import Config, _BoxedPlayer, mouse  # noqa: E402
+from tests.test_float_controls import (  # noqa: E402
+    controls_on_the_band,
+    drag_on,
+    edge_zones,
+    on_window,
+)
 from tests.test_tv_window import WindowCase  # noqa: E402
-from ui import mini_player, small_window  # noqa: E402
+from ui import float_controls, mini_player, small_window  # noqa: E402
 from ui.keymap import Action  # noqa: E402
 from ui.mini_player import MiniPlayer, MiniWindow  # noqa: E402
 from ui.pip import PipFrame  # noqa: E402
@@ -245,6 +251,114 @@ class MiniPlayerWindowTests(WindowCase):
         window = self.window.mini_player.window()
         self.assertIsNotNone(window)
         return window
+
+    def controls_up(self):
+        """The mini player, the window's controls up over it: the small window, the controls'
+        window (as the platform delivers the mouse to it) and the controls."""
+        window = self.window
+        self.show()
+        self.wait_for_drawer().close_drawer()
+        self.mini()
+        self.addCleanup(self.back_to_the_window)
+        small, host, transport = self.small(), window.host, window.overlays.transport
+        transport.poke()
+        self.app.processEvents()
+        self.assertTrue(host.isVisible())
+        self.assertEqual(host.geometry(), small.geometry())
+        return small, host.windowHandle(), transport
+
+    def back_to_the_window(self):
+        if self.window.mini_player_active():
+            self.window.toggle_mini_player()  # (back before the window goes: the Library's test)
+            self.app.processEvents()
+
+    def test_its_edges_win_over_the_windows_controls_over_it(self):
+        small, handle, transport = self.controls_up()
+        place = small.geometry()
+        for zone, (point, way) in edge_zones(small).items():
+            small.put(place)
+            transport.poke()
+            self.app.processEvents()
+            drag_on(handle, small.mapToGlobal(point), way)
+            geometry = small.geometry()
+            self.assertGreater(geometry.width(), place.width(), zone)
+            shape = geometry.width() / geometry.height()
+            self.assertTrue(picture.same_shape(shape, place.width() / place.height()), zone)
+            left, top = "left" in zone, "top" in zone
+            self.assertEqual(
+                geometry.right() if left else geometry.left(),
+                place.right() if left else place.left(),
+                zone,
+            )
+            self.assertEqual(
+                geometry.bottom() if top else geometry.top(),
+                place.bottom() if top else place.top(),
+                zone,
+            )
+        self.assertTrue(self.window.mini_player_active())
+        small.put(place)
+        transport.poke()
+        self.app.processEvents()
+        middle = QPoint(small.width() // 2, small.height() // 2)  # its picture, the controls up
+        with mock.patch.object(self.window.controller, "video_clicked"):
+            mouse(self.window.surface, QEvent.Type.MouseButtonPress, middle)
+            mouse(self.window.surface, QEvent.Type.MouseMove, middle + QPoint(30, 20))
+            mouse(
+                self.window.surface,
+                QEvent.Type.MouseButtonRelease,
+                middle + QPoint(30, 20),
+                Qt.MouseButton.NoButton,
+            )
+            elapse(QApplication.doubleClickInterval() + 50)
+        self.assertEqual(small.geometry(), place.translated(30, 20))  # the middle still drags it
+
+    def test_a_control_on_the_band_gives_it_to_the_edge_and_clicks_beside_it(self):
+        small, handle, transport = self.controls_up()
+        asked = []
+        for request in float_controls.requests():
+            getattr(transport, request).connect(lambda *_a, r=request: asked.append(r))
+        found = {
+            name: (inside, beside)
+            for name, inside, beside in controls_on_the_band(small, transport)
+        }
+        self.assertIn("play", found)
+        for name, (inside, beside) in found.items():
+            self.assertEqual(transport.control_at(QPointF(inside)), name)
+            on_window(handle, "press", small.mapToGlobal(inside))
+            self.assertIsNotNone(small._press, name)  # a resize begins
+            on_window(handle, "release", small.mapToGlobal(inside))
+            self.assertEqual(asked, [], name)
+            self.assertEqual(transport.control_at(QPointF(beside)), name)
+        _inside, beside = found["play"]
+        on_window(handle, "press", small.mapToGlobal(beside))
+        on_window(handle, "release", small.mapToGlobal(beside))
+        self.assertEqual(asked, ["playPauseRequested"])  # beside the band: the control's
+        middle = QPoint(small.width() // 2, round(small.height() * 0.7))  # the bottom shade
+        on_window(handle, "press", small.mapToGlobal(middle))
+        self.assertIsNone(small._press)  # not the edges'
+        on_window(handle, "release", small.mapToGlobal(middle))
+
+    def test_the_pointer_says_where_it_resizes_over_the_windows_controls(self):
+        small, handle, _transport = self.controls_up()
+        w, h = small.width(), small.height()
+        cursor = Qt.CursorShape
+        for point, shape in (
+            (QPoint(2, 2), cursor.SizeFDiagCursor),
+            (QPoint(w // 2, h - 3), cursor.SizeVerCursor),
+        ):
+            on_window(handle, "move", small.mapToGlobal(point))
+            self.assertEqual(handle.cursor().shape(), shape, point)
+        on_window(handle, "move", small.mapToGlobal(QPoint(w // 2, round(h * 0.7))))
+        self.assertEqual(handle.cursor().shape(), cursor.ArrowCursor)
+
+    def test_the_windows_controls_stay_up_through_a_resize(self):
+        small, handle, transport = self.controls_up()
+        transport._idle.setInterval(100)
+        corner = small.mapToGlobal(QPoint(small.width() - 2, small.height() - 2))
+        on_window(handle, "press", corner)
+        elapse(300)  # (still, mid-resize)
+        self.assertTrue(transport.isVisible())
+        on_window(handle, "release", corner)
 
     def test_the_mini_player_holds_the_page_under_the_windows_own_controls(self):
         window = self.window
