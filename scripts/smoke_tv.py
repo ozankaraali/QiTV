@@ -1796,7 +1796,7 @@ class Driver:
         report.step("pipeline 6. 1.5x speed")
         yield from self._wait(lambda: session.state() is PlaybackState.PLAYING, STATE_CHANGE_MS)
         requested = time.monotonic()
-        w.overlays.transport.speedRequested.emit(SPEED)
+        w.overlays.transport.speedRequested.emit(SPEED, "the smoke")
         state = yield from self._fresh(
             requested, lambda s: s["rate"] == SPEED and s["mode"] == "catching_up", SPEED_TIMEOUT_MS
         )
